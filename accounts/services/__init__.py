@@ -1,30 +1,18 @@
-"""Service layer helpers for external integrations and sentiment analysis."""
+"""Service layer helpers with lazy imports to avoid heavy startup cost."""
 
-# Optional imports - only available if NLP dependencies are installed
-try:
-    from accounts.services.sentiment_analysis import get_sentiment_analyzer
-    from accounts.services.mood_recommender import get_mood_recommender
-    __all__ = [
-        'get_sentiment_analyzer',
-        'get_mood_recommender',
-    ]
-except ImportError:
-    # NLP dependencies not installed - provide fallback functions
-    def get_sentiment_analyzer():
-        """Fallback when sentiment analysis dependencies are not installed."""
-        raise ImportError(
-            "Sentiment analysis requires additional packages. "
-            "Install them with: pip install numpy transformers sentence-transformers torch"
-        )
-    
-    def get_mood_recommender():
-        """Fallback when mood recommender dependencies are not installed."""
-        raise ImportError(
-            "Mood recommender requires additional packages. "
-            "Install them with: pip install numpy transformers sentence-transformers torch"
-        )
 
-__all__ = [
-    'get_sentiment_analyzer',
-    'get_mood_recommender',
-]
+def get_sentiment_analyzer():
+    """Import the analyzer lazily so package import stays cheap."""
+    from accounts.services.sentiment_analysis import get_sentiment_analyzer as _get
+
+    return _get()
+
+
+def get_mood_recommender():
+    """Import the recommender lazily so Django startup is not blocked."""
+    from accounts.services.mood_recommender import get_mood_recommender as _get
+
+    return _get()
+
+
+__all__ = ["get_sentiment_analyzer", "get_mood_recommender"]

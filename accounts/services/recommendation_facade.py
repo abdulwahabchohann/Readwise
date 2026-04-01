@@ -7,14 +7,24 @@ from typing import Any
 from django.conf import settings
 
 from .cover_utils import PLACEHOLDER_COVER_URL, normalize_cover
-from .dataset_recommender import get_dataset_recommender
-from .mood_recommender import get_mood_recommender
 
 logger = logging.getLogger(__name__)
 
 
 class RecommendationUnavailableError(RuntimeError):
     """Raised when neither recommendation engine can produce usable results."""
+
+
+def get_mood_recommender():
+    from .mood_recommender import get_mood_recommender as _get
+
+    return _get()
+
+
+def get_dataset_recommender(dataset_path: str):
+    from .dataset_recommender import get_dataset_recommender as _get
+
+    return _get(dataset_path)
 
 
 def _resolve_dataset_path() -> str:
