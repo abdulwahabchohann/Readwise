@@ -113,13 +113,17 @@ Open a PythonAnywhere `Bash` console and run:
 
 ```bash
 cd ~
-git clone https://github.com/abdulwahabchohann/final-year-project.git
+git clone https://github.com/abdulwahabchohann/Readwise.git final-year-project
 cd final-year-project
 python3.10 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
-pip install -r requirements.txt
+pip install -r requirements-pythonanywhere.txt
 ```
+
+Notes:
+- Use `requirements-pythonanywhere.txt` on the free plan. It excludes `torch`, `transformers`, `sentence-transformers`, test packages, and other heavy extras that exceed PythonAnywhere disk quota.
+- On PythonAnywhere, mood recommendations will still work via the existing keyword/dataset fallback path when the heavy ML packages are not installed.
 
 ## 3) Configure environment variables
 
