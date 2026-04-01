@@ -58,8 +58,8 @@ MOOD_CATEGORIES = {
 # Mood compatibility matrix (which moods complement or improve each other)
 MOOD_COMPATIBILITY = {
     'sad': ['hopeful', 'inspired', 'relaxed', 'happy'],
-    'anxious': ['relaxed', 'calm', 'hopeful', 'happy'],
-    'angry': ['relaxed', 'calm', 'hopeful', 'happy'],
+    'anxious': ['relaxed', 'hopeful', 'happy', 'inspired'],   # 'calm' removed – not a MOOD_CATEGORIES key
+    'angry': ['relaxed', 'hopeful', 'happy', 'inspired'],     # 'calm' removed – not a MOOD_CATEGORIES key
     'happy': ['excited', 'inspired', 'romantic', 'hopeful'],
     'relaxed': ['happy', 'hopeful', 'inspired', 'romantic'],
     'excited': ['happy', 'inspired', 'hopeful'],

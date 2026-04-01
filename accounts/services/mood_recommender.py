@@ -15,7 +15,7 @@ from decimal import Decimal
 from typing import Dict, List, Optional, Tuple
 from functools import lru_cache
 
-from django.db.models import Q, QuerySet
+from django.db.models import Case, IntegerField, Q, QuerySet, Value, When
 from accounts.models import Book
 from accounts.services.cover_utils import PLACEHOLDER_COVER_URL, normalize_cover
 from accounts.services.sentiment_analysis import get_sentiment_analyzer, MOOD_COMPATIBILITY
@@ -68,17 +68,28 @@ class MoodRecommender:
         if not user_mood or not user_mood.strip():
             logger.warning("Empty user mood provided")
             return []
-        
+
         # Analyze user's mood
         user_analysis = self.analyzer.analyze_text(user_mood)
         user_dominant_mood = user_analysis.get('dominant_mood', 'neutral')
         user_moods = user_analysis.get('moods', {})
-        
+
         logger.info(f"User mood analysis: {user_dominant_mood} (confidence: {user_analysis.get('confidence', 0.0):.2f})")
-        
+
+        # Bug #3 fix: keyword-based fallback produces much lower raw scores than
+        # the transformer pipeline, so auto-reduce the threshold to avoid filtering
+        # every book out when heavy ML models are not installed.
+        analysis_method = user_analysis.get('analysis_method', 'keyword')
+        effective_min_confidence = min_confidence if analysis_method == 'transformer' else min(min_confidence, 0.05)
+        if effective_min_confidence != min_confidence:
+            logger.info(
+                "recommend_books: lowering min_confidence %.2f → %.2f (analysis_method=%s)",
+                min_confidence, effective_min_confidence, analysis_method,
+            )
+
         # Get candidate books
         candidate_books = self._get_candidate_books(user_dominant_mood, improve_mood)
-        
+
         if not candidate_books:
             logger.warning("No candidate books found")
             return []
@@ -96,7 +107,7 @@ class MoodRecommender:
                 improve_mood,
             )
 
-            if score >= min_confidence:
+            if score >= effective_min_confidence:
                 scored_books.append({
                     'book': book,
                     'score': score,
@@ -253,51 +264,66 @@ class MoodRecommender:
         Returns:
             QuerySet of candidate books
         """
-        # Base query - get books with descriptions
+        # Base query — books must have a description for meaningful scoring
         base_query = Book.objects.filter(
             description__isnull=False
         ).exclude(
             description=''
         ).select_related().prefetch_related('genres', 'authors')
-        
+
         if improve_mood:
             # Get compatible moods that improve the user's mood
             compatible_moods = MOOD_COMPATIBILITY.get(user_mood, [])
-            
+
             if compatible_moods:
                 # Filter by sentiment label for quick filtering
-                # Positive books are more likely to improve mood
                 if user_mood in ['sad', 'anxious', 'angry']:
-                    base_query = base_query.filter(sentiment_label='positive')
+                    strict_q = base_query.filter(sentiment_label='positive')
                 elif user_mood in ['happy', 'excited', 'hopeful']:
-                    # For already positive moods, maintain or enhance
-                    base_query = base_query.filter(
+                    strict_q = base_query.filter(
                         Q(sentiment_label__in=['positive', 'neutral'])
                         | Q(sentiment_label='')
                         | Q(sentiment_label__isnull=True)
                     )
+                else:
+                    strict_q = base_query.filter(sentiment_label='positive')
             else:
-                # Default to positive books for mood improvement
-                base_query = base_query.filter(sentiment_label='positive')
+                strict_q = base_query.filter(sentiment_label='positive')
         else:
             # Match current mood
             if user_mood in ['sad', 'anxious', 'angry']:
-                base_query = base_query.filter(sentiment_label='negative')
+                strict_q = base_query.filter(sentiment_label='negative')
             elif user_mood in ['happy', 'excited', 'hopeful', 'inspired']:
-                base_query = base_query.filter(sentiment_label='positive')
+                strict_q = base_query.filter(sentiment_label='positive')
             else:
-                base_query = base_query.filter(
+                strict_q = base_query.filter(
                     Q(sentiment_label='neutral')
                     | Q(sentiment_label='')
                     | Q(sentiment_label__isnull=True)
                 )
-        
-        # OPTIMIZATION: Prefer pre-computed mood_scores, but do not exclude books
-        # without them to avoid repeating the same small candidate pool.
-        
-        # Order by ratings for better recommendations
-        base_query = base_query.order_by('-average_rating', '-ratings_count')
-        
+
+        # Bug #2 safety net: if the sentiment-filtered queryset is empty (books
+        # haven't been labelled yet), fall back to ANY book with a description so
+        # the recommender can still return results using the score-fallback path.
+        if strict_q.exists():
+            base_query = strict_q
+        else:
+            logger.warning(
+                "_get_candidate_books: no books match sentiment filter for mood=%s improve=%s; "
+                "falling back to all books with descriptions.",
+                user_mood, improve_mood,
+            )
+            # base_query already has description filter applied; use as-is
+
+        # Prefer books with stored mood metadata before sentiment-only fallback books.
+        base_query = base_query.annotate(
+            has_mood_metadata=Case(
+                When(dominant_mood__gt='', then=Value(1)),
+                default=Value(0),
+                output_field=IntegerField(),
+            )
+        ).order_by('-has_mood_metadata', '-average_rating', '-ratings_count')
+
         # PERFORMANCE: Use a larger candidate pool to improve variety.
         return base_query[:500]
     
@@ -317,7 +343,8 @@ class MoodRecommender:
         """
         # Get book's mood analysis
         # Use stored analysis if available to avoid expensive re-computation
-        if book.mood_scores and book.mood_scores != '{}' and book.dominant_mood:
+        metadata_backed = bool(book.mood_scores and book.mood_scores != '{}' and book.dominant_mood)
+        if metadata_backed:
             book_moods = book.mood_scores
             if isinstance(book_moods, str):
                 try:
@@ -400,6 +427,11 @@ class MoodRecommender:
                         f"providing a reading experience that matches your current state of mind."
                     )
         
+        if not metadata_backed:
+            # Sentiment-only pseudo-moods are useful as a safety net, but should
+            # rank below books with actual stored mood metadata when scores are similar.
+            match_score *= 0.82
+
         # Normalize score to 0-1 range
         match_score = min(max(match_score, 0.0), 1.0)
         

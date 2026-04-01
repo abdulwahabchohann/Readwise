@@ -21,24 +21,42 @@ def _ensure_helpers_loaded() -> None:
     global MOODS, compute_intensity, compute_sentiment, round_probabilities, score_moods
     if MOODS and compute_intensity and compute_sentiment and round_probabilities and score_moods:
         return
+
+    import sys
+    import os
+
+    # Try direct import first (works if Django project root is already on sys.path)
+    # Then fall back to the scripts/ subdirectory where the file physically lives.
+    _script_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "scripts")
+    _inserted = False
+    if _script_dir not in sys.path:
+        sys.path.insert(0, _script_dir)
+        _inserted = True
+
     try:
-        from enrich_books_dataset import (
+        from enrich_books_dataset import (  # type: ignore[import]
             MOODS as SOURCE_MOODS,
             compute_intensity as SOURCE_COMPUTE_INTENSITY,
             compute_sentiment as SOURCE_COMPUTE_SENTIMENT,
             round_probabilities as SOURCE_ROUND_PROBABILITIES,
             score_moods as SOURCE_SCORE_MOODS,
         )
-    except ImportError as exc:  # pragma: no cover - fallback should not trigger in repo
+    except ImportError as exc:
         raise ImportError(
-            "enrich_books_dataset.py must be importable for deterministic mood scoring."
+            "enrich_books_dataset.py must be importable. "
+            "Ensure it is in the project root or in the scripts/ directory."
         ) from exc
+    finally:
+        # Remove the injected path to keep sys.path clean for other imports
+        if _inserted and _script_dir in sys.path:
+            sys.path.remove(_script_dir)
 
     MOODS = list(SOURCE_MOODS)
     compute_intensity = SOURCE_COMPUTE_INTENSITY
     compute_sentiment = SOURCE_COMPUTE_SENTIMENT
     round_probabilities = SOURCE_ROUND_PROBABILITIES
     score_moods = SOURCE_SCORE_MOODS
+
 
 
 DEFAULT_WEIGHTS = {
