@@ -51,6 +51,8 @@ staticfiles/
 # OS
 .DS_Store
 Thumbs.db
+/*.json
+!/.env.example
 
 # Project specific
 *.sqlite
