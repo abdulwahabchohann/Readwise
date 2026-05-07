@@ -1,18 +1,28 @@
 import json
+from types import SimpleNamespace
 
 import pytest
+from django.core.cache import cache
 from django.urls import reverse
 
 from accounts.models import Book
-from accounts.services.cover_utils import PLACEHOLDER_COVER_URL
+from accounts.services.cover_utils import PLACEHOLDER_COVER_URL, normalize_cover
 from accounts.services.mood_recommender import MoodRecommender
 from accounts.services.recommendation_facade import (
     RecommendationUnavailableError,
     get_recommendations_for_mood,
 )
+from accounts.services.sentiment_analysis import SentimentAnalyzer
 
 
 pytestmark = pytest.mark.django_db
+
+
+@pytest.fixture(autouse=True)
+def clear_recommendation_cache():
+    cache.clear()
+    yield
+    cache.clear()
 
 SAMPLE_MOODS = [
     'I feel anxious and need something calming',
@@ -54,6 +64,33 @@ def test_recommendations_page_renders_cards_for_sample_moods(client, monkeypatch
     assert 'Ready to find your perfect book?' not in body
 
 
+def test_recommendations_page_uses_facade_match_percent_as_is(client, monkeypatch):
+    monkeypatch.setattr(
+        'accounts.views.get_recommendations_for_mood',
+        lambda *args, **kwargs: [
+            {
+                'book_id': 1,
+                'title': 'Display Authority',
+                'author': 'Test Author',
+                'genre': 'Fiction',
+                'cover_image': PLACEHOLDER_COVER_URL,
+                'dominant_mood': 'happy',
+                'recommendation_reason': 'Keep the facade-provided display percent.',
+                'sentiment_score': 0.12,
+                'match_percent': 88,
+                'source': 'mood',
+            }
+        ],
+    )
+
+    response = client.post(reverse('recommendations'), {'mood': 'I feel happy', 'improve_mood': 'on'})
+
+    assert response.status_code == 200
+    body = response.content.decode('utf-8')
+    assert '88% Match' in body
+    assert '12% Match' not in body
+
+
 def test_mood_api_returns_fallback_diagnostics(client, monkeypatch):
     monkeypatch.setattr(
         'accounts.views.get_recommendations_for_mood',
@@ -70,6 +107,36 @@ def test_mood_api_returns_fallback_diagnostics(client, monkeypatch):
     payload = response.json()
     assert payload['fallback_used'] is True
     assert payload['recommendations'][0]['source'] == 'dataset_fallback'
+
+
+def test_mood_api_uses_facade_match_percent_as_is(client, monkeypatch):
+    monkeypatch.setattr(
+        'accounts.views.get_recommendations_for_mood',
+        lambda *args, **kwargs: [
+            {
+                'book_id': 1,
+                'title': 'API Authority',
+                'author': 'Test Author',
+                'genre': 'Fiction',
+                'cover_image': PLACEHOLDER_COVER_URL,
+                'dominant_mood': 'happy',
+                'recommendation_reason': 'Keep the facade-provided display percent.',
+                'sentiment_score': 0.12,
+                'match_percent': 88,
+                'source': 'mood',
+            }
+        ],
+    )
+
+    response = client.post(
+        reverse('api_mood_recommendations'),
+        data=json.dumps({'mood': 'I feel happy', 'improve_mood': True, 'limit': 3}),
+        content_type='application/json',
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['recommendations'][0]['match_percent'] == 88
 
 
 def test_mood_api_requires_mood(client):
@@ -126,6 +193,7 @@ def test_facade_falls_back_when_mood_returns_empty(monkeypatch):
                     'title': 'Dataset Rescue',
                     'author': 'Fallback Author',
                     'genres': ['Fiction', 'Fantasy'],
+                    'cover_image': 'https://covers.example.org/dataset-rescue.jpg',
                     'score': 0.75,
                     'dominant_mood': 'Excited',
                     'explanation': 'Fallback recommendation.',
@@ -140,6 +208,7 @@ def test_facade_falls_back_when_mood_returns_empty(monkeypatch):
     assert recommendations[0]['title'] == 'Dataset Rescue'
     assert recommendations[0]['source'] == 'dataset_fallback'
     assert recommendations[0]['genre'] == 'Fiction, Fantasy'
+    assert recommendations[0]['cover_image'] == 'https://covers.example.org/dataset-rescue.jpg'
 
 
 def test_facade_falls_back_when_mood_raises(monkeypatch):
@@ -223,3 +292,175 @@ def test_metadata_backed_books_rank_ahead_of_sentiment_only_books(monkeypatch):
     recommendations = recommender.recommend_books('I feel happy', limit=2, improve_mood=False, min_confidence=0.3)
 
     assert [item['title'] for item in recommendations[:2]] == ['Structured Joy', 'Sentiment Only']
+
+
+def test_improve_mood_scoring_does_not_saturate_sentiment_only_positive_books():
+    class StubAnalyzer:
+        def match_mood(self, user_text, book_moods):
+            return 0.0
+
+    recommender = MoodRecommender.__new__(MoodRecommender)
+    recommender.analyzer = StubAnalyzer()
+    fallback_book = SimpleNamespace(
+        mood_scores={},
+        dominant_mood='',
+        sentiment_label='positive',
+    )
+
+    score, _, _ = recommender._score_book(
+        fallback_book,
+        'I feel sad and need something hopeful',
+        {'dominant_mood': 'sad', 'moods': {'sad': 1.0}},
+        'sad',
+        {'sad': 1.0},
+        True,
+    )
+
+    assert 0.0 < score < 1.0
+
+
+def test_dedupe_keeps_distinct_same_title_books_without_isbn():
+    recommender = MoodRecommender.__new__(MoodRecommender)
+    book_one = SimpleNamespace(id=1, title='Shared Title', isbn_10='', isbn_13='', primary_author=lambda: '')
+    book_two = SimpleNamespace(id=2, title='Shared Title', isbn_10='', isbn_13='', primary_author=lambda: '')
+
+    unique = recommender._dedupe_scored_books(
+        [
+            {'book': book_one, 'score': 0.5},
+            {'book': book_two, 'score': 0.4},
+        ]
+    )
+
+    assert [item['book'].id for item in unique] == [1, 2]
+
+
+def test_cover_trace_is_recorded_even_when_cover_resolution_cache_hits():
+    recommender = MoodRecommender.__new__(MoodRecommender)
+    recommender.analyzer = None
+    MoodRecommender._resolve_cover_choice.cache_clear()
+    book = SimpleNamespace(
+        id=99,
+        title='Cached Cover',
+        cover_image='https://covers.example.org/cached.jpg',
+        isbn_10='',
+        isbn_13='',
+        primary_author=lambda: '',
+    )
+
+    recommender._reset_cover_trace()
+    first_cover = recommender._cover_image_for(book)
+    first_source = recommender._cover_trace_map[99]['source']
+
+    recommender._reset_cover_trace()
+    second_cover = recommender._cover_image_for(book)
+    second_source = recommender._cover_trace_map[99]['source']
+
+    assert first_cover == 'https://covers.example.org/cached.jpg'
+    assert second_cover == first_cover
+    assert first_source == 'db_cover'
+    assert second_source == 'db_cover'
+
+
+def test_dataset_api_returns_cover_image_from_dataset(client, monkeypatch):
+    class StubDatasetRecommender:
+        def recommend(self, *args, **kwargs):
+            return [
+                {
+                    'book_id': '201',
+                    'title': 'Dataset Cover',
+                    'author': 'Fallback Author',
+                    'genres': ['Fantasy'],
+                    'cover_image': 'https://covers.example.org/dataset-cover.jpg',
+                    'isbn_10': '1234567890',
+                    'isbn_13': '9781234567890',
+                    'score': 0.81,
+                    'dominant_mood': 'Hopeful',
+                    'sentiment_score': 0.81,
+                    'emotional_intensity': 0.45,
+                    'explanation': 'Uses dataset-provided cover.',
+                }
+            ]
+
+        def analyze_user_mood(self, user_text):
+            class Profile:
+                dominant_mood = 'hopeful'
+                sentiment_score = 0.5
+                emotional_intensity = 0.4
+                mood_scores = {'hopeful': 1.0}
+
+            return Profile()
+
+    monkeypatch.setattr(
+        'accounts.services.dataset_recommender.get_dataset_recommender',
+        lambda *args, **kwargs: StubDatasetRecommender(),
+    )
+
+    response = client.post(
+        reverse('api_dataset_recommendations'),
+        data=json.dumps({'mood': 'I need hope', 'limit': 3}),
+        content_type='application/json',
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload['recommendations'][0]['cover_image'] == 'https://covers.example.org/dataset-cover.jpg'
+    assert payload['recommendations'][0]['isbn_10'] == '1234567890'
+    assert payload['recommendations'][0]['isbn_13'] == '9781234567890'
+
+
+def test_normalize_cover_rejects_example_dot_com_urls():
+    assert normalize_cover('https://example.com/covers/42.jpg') == PLACEHOLDER_COVER_URL
+    assert normalize_cover('https://example.com/placeholder_cover.png') == PLACEHOLDER_COVER_URL
+
+
+def test_sentiment_analyzer_respects_disabled_transformers(monkeypatch):
+    monkeypatch.setenv('ENABLE_TRANSFORMERS', 'false')
+    monkeypatch.setattr('accounts.services.sentiment_analysis.SENTENCE_TRANSFORMERS_AVAILABLE', True)
+    monkeypatch.setattr('accounts.services.sentiment_analysis.TRANSFORMERS_AVAILABLE', True)
+    monkeypatch.setattr('accounts.services.sentiment_analysis.NUMPY_AVAILABLE', True)
+    monkeypatch.setattr('accounts.services.sentiment_analysis.SentenceTransformer', lambda *args, **kwargs: pytest.fail('transformer bootstrap should be disabled'))
+    monkeypatch.setattr('accounts.services.sentiment_analysis.pipeline', lambda *args, **kwargs: pytest.fail('pipeline bootstrap should be disabled'))
+
+    analyzer = SentimentAnalyzer()
+
+    assert analyzer.embedding_model is None
+    assert analyzer.emotion_classifier is None
+    assert analyzer.analyze_text('I feel hopeful today')['analysis_method'] == 'keyword'
+
+
+def test_recommendations_return_best_available_when_threshold_filters_everything(monkeypatch):
+    book = Book.objects.create(
+        title='Threshold Rescue',
+        description='A low-confidence but valid book.',
+        sentiment_label='neutral',
+    )
+
+    class StubAnalyzer:
+        def analyze_text(self, text):
+            return {
+                'dominant_mood': 'neutral',
+                'moods': {'neutral': 1.0},
+                'confidence': 1.0,
+                'analysis_method': 'transformer',
+            }
+
+        def match_mood(self, user_text, book_moods):
+            return 0.05
+
+    recommender = MoodRecommender.__new__(MoodRecommender)
+    recommender.analyzer = StubAnalyzer()
+    recommender._cover_trace_map = {}
+    monkeypatch.setattr(recommender, '_get_candidate_books', lambda *args, **kwargs: [book])
+    monkeypatch.setattr(recommender, '_reset_cover_trace', lambda: None)
+    monkeypatch.setattr(recommender, '_log_cover_summary', lambda total: None)
+    monkeypatch.setattr(recommender, '_cover_image_for', lambda current_book: PLACEHOLDER_COVER_URL)
+    monkeypatch.setattr(
+        recommender,
+        '_score_book',
+        lambda *args, **kwargs: (0.05, 'Fallback rescue result.', 'neutral'),
+    )
+
+    recommendations = recommender.recommend_books('I feel uncertain', limit=1, improve_mood=False, min_confidence=0.3)
+
+    assert len(recommendations) == 1
+    assert recommendations[0]['title'] == 'Threshold Rescue'

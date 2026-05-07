@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en" class="scroll-smooth">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Abdul Wahab | Generative AI Engineer</title>
+    <meta
+      name="description"
+      content="Generative AI Engineer portfolio focused on production-ready AI systems, Django APIs, semantic retrieval, and backend engineering."
+    />
+    <meta
+      name="keywords"
+      content="Generative AI Engineer, Django, DRF, FAISS, Sentence Transformers, Celery, portfolio, backend engineer"
+    />
+    <meta name="author" content="Abdul Wahab" />
+    <meta name="theme-color" content="#f6f7fb" />
+    <meta property="og:title" content="Abdul Wahab | Generative AI Engineer" />
+    <meta
+      property="og:description"
+      content="Production-focused portfolio for backend and Generative AI engineering roles."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:image" content="/assets/readwise-illustration.png" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Abdul Wahab | Generative AI Engineer" />
+    <meta
+      name="twitter:description"
+      content="Backend-first AI engineer building reliable Django APIs, retrieval systems, and AI products."
+    />
+    <meta name="twitter:image" content="/assets/readwise-illustration.png" />
+    <script>
+      (() => {
+        const storedTheme = localStorage.getItem('portfolio-theme');
+        const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+        if (storedTheme === 'dark' || (!storedTheme && prefersDark)) {
+          document.documentElement.classList.add('dark');
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

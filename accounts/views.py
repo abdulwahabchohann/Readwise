@@ -263,107 +263,6 @@ def _coerce_bool(value, default: bool = True) -> bool:
     return bool(value)
 
 
-def _recommendation_book_lookup_key(value) -> int | None:
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str) and value.isdigit():
-        return int(value)
-    return None
-
-
-def _finalize_recommendations_payload(recommendations_list: list[dict]) -> list[dict]:
-    if not recommendations_list:
-        return recommendations_list
-
-    placeholder_cover = PLACEHOLDER_COVER_URL
-    source_counts: dict[str, int] = {}
-    lookup_ids = [
-        key
-        for key in (_recommendation_book_lookup_key(rec.get('book_id')) for rec in recommendations_list)
-        if key is not None
-    ]
-    books_by_id = {book.id: book for book in Book.objects.filter(id__in=lookup_ids)}
-
-    def _is_valid_cover_url(value: str) -> bool:
-        return isinstance(value, str) and normalize_cover(value) == value
-
-    for rec in recommendations_list:
-        raw_cover = rec.get('cover_image') or rec.get('thumbnail') or ''
-        cover = normalize_cover(raw_cover)
-        cover_source = 'missing'
-
-        lookup_key = _recommendation_book_lookup_key(rec.get('book_id'))
-        book = books_by_id.get(lookup_key)
-        if cover != placeholder_cover:
-            if book:
-                stored_cover = normalize_cover(book.cover_image)
-                if stored_cover != placeholder_cover and cover == stored_cover:
-                    cover_source = 'db_cover'
-                else:
-                    for ident in (book.isbn_13, book.isbn_10):
-                        clean_ident = (ident or '').replace('-', '').strip()
-                        if not clean_ident:
-                            continue
-                        openlibrary = f'https://covers.openlibrary.org/b/isbn/{clean_ident}-L.jpg'
-                        if cover == openlibrary:
-                            cover_source = 'openlibrary_isbn'
-                            break
-                    if cover_source == 'missing':
-                        if 'google' in cover or 'googleusercontent' in cover:
-                            cover_source = 'google_books'
-                        else:
-                            cover_source = 'external'
-            else:
-                if 'google' in cover or 'googleusercontent' in cover:
-                    cover_source = 'google_books'
-                else:
-                    cover_source = 'external'
-        else:
-            cover_source = 'placeholder'
-
-        logger.info(
-            "recommendations.cover: book_id=%s title=%s raw=%s resolved=%s source=%s",
-            rec.get('book_id'),
-            rec.get('title'),
-            raw_cover,
-            cover,
-            cover_source,
-        )
-        if settings.DEBUG and not _is_valid_cover_url(cover):
-            logger.warning(
-                "recommendations: invalid cover_image detected for "
-                "book_id=%s title=%s value=%r - falling back to placeholder.",
-                rec.get('book_id'),
-                rec.get('title'),
-                cover,
-            )
-            cover = placeholder_cover
-        rec['cover_image'] = normalize_cover(cover)
-        try:
-            score = float(rec.get('sentiment_score') or 0)
-        except (TypeError, ValueError):
-            score = 0.0
-        rec['match_percent'] = int(round(score * 100))
-        source_counts[cover_source] = source_counts.get(cover_source, 0) + 1
-
-    total = len(recommendations_list)
-    if total:
-        placeholder_count = source_counts.get('placeholder', 0)
-        logger.info(
-            "recommendations.cover_summary total=%s db_cover=%s openlibrary=%s google_books=%s "
-            "placeholder=%s placeholder_pct=%.1f other=%s",
-            total,
-            source_counts.get('db_cover', 0),
-            source_counts.get('openlibrary_isbn', 0),
-            source_counts.get('google_books', 0),
-            placeholder_count,
-            (placeholder_count / total) * 100,
-            source_counts.get('external', 0),
-        )
-
-    return recommendations_list
-
-
 def _get_external_trending(limit: int) -> list[dict]:
     try:
         payloads = fetch_books_for_category('fiction', 'Fiction', page=1) or []
@@ -723,7 +622,6 @@ class MoodRecommendationsAPIView(APIView):
                 limit=limit,
                 improve_mood=improve_mood,
             )
-            recommendations = _finalize_recommendations_payload(recommendations)
             return Response(
                 {
                     'mood': user_mood,
@@ -790,7 +688,9 @@ class DatasetRecommendationsAPIView(APIView):
                         'genres': rec.get('genres', []),
                         'average_rating': rec.get('average_rating'),
                         'ratings_count': rec.get('ratings_count'),
-                        'cover_image': normalize_cover(PLACEHOLDER_COVER_URL),
+                        'cover_image': normalize_cover(rec.get('cover_image') or PLACEHOLDER_COVER_URL),
+                        'isbn_10': rec.get('isbn_10'),
+                        'isbn_13': rec.get('isbn_13'),
                         'dominant_mood': rec.get('dominant_mood'),
                         'sentiment_score': rec.get('sentiment_score'),
                         'emotional_intensity': rec.get('emotional_intensity'),
@@ -828,10 +728,9 @@ class DatasetRecommendationsAPIView(APIView):
 
 
 def _legacy_recommendations(request):
-    """
-    Mood-based book recommendations view.
-    Supports both GET (form) and POST (mood input) requests.
-    """
+    """Legacy alias for the unified recommendations page."""
+    return recommendations(request)
+
     recommendations_list = []
     user_mood = ''
     error_message = ''
@@ -974,7 +873,6 @@ def recommendations(request):
                     limit=3,
                     improve_mood=improve_mood,
                 )
-                recommendations_list = _finalize_recommendations_payload(recommendations_list)
             except RecommendationUnavailableError as exc:
                 error_message = 'Unable to generate recommendations at this time. Please try again later.'
                 logger.error("Error in recommendations view: %s", exc, exc_info=True)

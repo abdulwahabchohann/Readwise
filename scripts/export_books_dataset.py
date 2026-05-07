@@ -14,7 +14,8 @@ cursor.execute("""
         b.id, b.title, b.description, b.published_year,
         b.average_rating, b.ratings_count, b.language,
         b.sentiment_score, b.mood_scores, b.dominant_mood,
-        b.emotional_intensity, b.page_count
+        b.emotional_intensity, b.page_count, b.cover_image,
+        b.isbn_10, b.isbn_13
     FROM accounts_book b
     WHERE b.description IS NOT NULL AND b.description != ''
     ORDER BY RANDOM()
@@ -57,6 +58,9 @@ for row in cursor.fetchall():
         'dominant_mood': row[9],
         'emotional_intensity': float(row[10]) if row[10] else None,
         'page_count': row[11],
+        'cover_image': row[12] or '',
+        'isbn_10': row[13] or '',
+        'isbn_13': row[14] or '',
         'reviews': []  # Can add synthetic reviews later if needed
     }
     

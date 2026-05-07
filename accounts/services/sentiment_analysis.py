@@ -14,8 +14,11 @@ Features:
 from __future__ import annotations
 
 import logging
+import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
+
+from django.conf import settings
 
 # Guarded imports for optional heavy ML dependencies
 try:
@@ -70,6 +73,17 @@ MOOD_COMPATIBILITY = {
 }
 
 
+def _transformers_enabled() -> bool:
+    raw_value = os.getenv('ENABLE_TRANSFORMERS')
+    if raw_value is not None:
+        return raw_value.strip().lower() in {'1', 'true', 'yes', 'on'}
+
+    try:
+        return bool(getattr(settings, 'ENABLE_TRANSFORMERS', True))
+    except Exception:
+        return True
+
+
 class SentimentAnalyzer:
     """
     Advanced sentiment analyzer using transformer models for multi-mood recognition.
@@ -89,6 +103,14 @@ class SentimentAnalyzer:
             model_name: Sentence transformer model for embeddings
             emotion_model: Emotion classification model for mood detection
         """
+        self.embedding_model = None
+        self.emotion_classifier = None
+        self.mood_embeddings = {}
+
+        if not _transformers_enabled():
+            logger.info("Transformer sentiment models disabled by configuration. Using keyword-based analysis.")
+            return
+
         # Check if required packages are available
         if not SENTENCE_TRANSFORMERS_AVAILABLE or not TRANSFORMERS_AVAILABLE or not NUMPY_AVAILABLE:
             logger.warning(
@@ -96,9 +118,6 @@ class SentimentAnalyzer:
                 f"sentence_transformers={SENTENCE_TRANSFORMERS_AVAILABLE}, "
                 f"transformers={TRANSFORMERS_AVAILABLE}). Falling back to keyword-based analysis."
             )
-            self.embedding_model = None
-            self.emotion_classifier = None
-            self.mood_embeddings = {}
             return
         
         try:
@@ -120,16 +139,10 @@ class SentimentAnalyzer:
             # Catch specific errors: ImportError (missing deps), OSError (model download issues), RuntimeError (CUDA/device issues)
             logger.error(f"Error initializing sentiment analyzer: {e}")
             # Fallback to lightweight models if heavy models fail
-            self.embedding_model = None
-            self.emotion_classifier = None
-            self.mood_embeddings = {}
             logger.warning("Falling back to keyword-based sentiment analysis")
         except Exception as e:
             # Catch any other unexpected errors
             logger.error(f"Unexpected error initializing sentiment analyzer: {e}", exc_info=True)
-            self.embedding_model = None
-            self.emotion_classifier = None
-            self.mood_embeddings = {}
             logger.warning("Falling back to keyword-based sentiment analysis")
     
     def _precompute_mood_embeddings(self) -> Dict[str, any]:
@@ -366,39 +379,36 @@ class SentimentAnalyzer:
         """
         if not user_mood_text or not book_moods:
             return 0.0
-        
-        # Analyze user's mood
+
         user_analysis = self.analyze_text(user_mood_text)
-        user_moods = user_analysis.get('moods', {})
+        return self.match_mood_from_analysis(user_analysis, book_moods)
+
+    def match_mood_from_analysis(self, user_analysis: Dict[str, Any], book_moods: Dict[str, float]) -> float:
+        """Calculate mood alignment from a precomputed user analysis payload."""
+        if not user_analysis or not book_moods:
+            return 0.0
+
+        user_moods = user_analysis.get('moods', {}) or {}
         user_dominant = user_analysis.get('dominant_mood', 'neutral')
-        
-        # Direct mood match
-        direct_match = book_moods.get(user_dominant, 0.0)
-        
-        # Compatibility match (check if book has moods that complement user's mood)
+
+        direct_match = float(book_moods.get(user_dominant, 0.0) or 0.0)
         compatible_moods = MOOD_COMPATIBILITY.get(user_dominant, [])
-        compatibility_score = sum(book_moods.get(mood, 0.0) for mood in compatible_moods) / max(len(compatible_moods), 1)
-        
-        # Semantic similarity using embeddings
-        semantic_score = 0.0
-        if self.embedding_model and NUMPY_AVAILABLE:
-            try:
-                user_embedding = self.embedding_model.encode(user_mood_text, normalize_embeddings=True)
-                # Create book mood representation
-                book_mood_text = ' '.join([mood for mood, score in sorted(book_moods.items(), key=lambda x: x[1], reverse=True)[:3]])
-                if book_mood_text:
-                    book_embedding = self.embedding_model.encode(book_mood_text, normalize_embeddings=True)
-                    semantic_score = float(np.dot(user_embedding, book_embedding))
-            except Exception as e:
-                logger.warning(f"Error calculating semantic similarity: {e}")
-        
-        # Weighted combination
+        compatibility_score = sum(float(book_moods.get(mood, 0.0) or 0.0) for mood in compatible_moods)
+        compatibility_score /= max(len(compatible_moods), 1)
+
+        weighted_overlap = 0.0
+        user_total = 0.0
+        for mood, score in user_moods.items():
+            user_score = float(score or 0.0)
+            user_total += max(0.0, user_score)
+            weighted_overlap += max(0.0, user_score) * float(book_moods.get(mood, 0.0) or 0.0)
+        semantic_score = weighted_overlap / max(user_total, 1.0)
+
         match_score = (
             direct_match * 0.4 +
             compatibility_score * 0.3 +
             semantic_score * 0.3
         )
-        
         return min(max(match_score, 0.0), 1.0)
 
 

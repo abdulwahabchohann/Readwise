@@ -183,7 +183,7 @@ class Command(BaseCommand):
                 'published_year': random.randint(1950, 2024),
                 'page_count': random.randint(100, 800),
                 'language': random.choice(['en', 'es', 'fr', 'de', 'it']),
-                'cover_image': f"https://example.com/covers/{i + 1}.jpg",
+                'cover_image': '',
                 'average_rating': Decimal(str(round(random.uniform(2.5, 5.0), 2))),
                 'ratings_count': random.randint(0, 10000),
                 'price': Decimal(str(round(random.uniform(5.99, 29.99), 2))),

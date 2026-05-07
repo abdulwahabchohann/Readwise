@@ -140,6 +140,17 @@ def _intensity_alignment(user_intensity: float, book_intensity: float) -> float:
     return max(0.0, 1.0 - abs(book_intensity - user_intensity))
 
 
+def _fallback_cover_image(book: Dict[str, Any]) -> str:
+    cover = str(book.get("cover_image") or "").strip()
+    if cover:
+        return cover
+    for ident_key in ("isbn_13", "isbn_10"):
+        ident = str(book.get(ident_key) or "").replace("-", "").strip()
+        if ident:
+            return f"https://covers.openlibrary.org/b/isbn/{ident}-L.jpg"
+    return ""
+
+
 class DatasetMoodRecommender:
     """
     Mood-based recommender operating on a JSON dataset.
@@ -209,6 +220,7 @@ class DatasetMoodRecommender:
         book["dominant_mood"] = dominant_mood
         book["sentiment_score"] = sentiment_score
         book["emotional_intensity"] = emotional_intensity
+        book["cover_image"] = _fallback_cover_image(book)
         book["_mood_vector"] = _vectorize(mood_scores)
 
     def analyze_user_mood(self, user_text: str) -> MoodProfile:
@@ -246,6 +258,9 @@ class DatasetMoodRecommender:
                     "description": book.get("description"),
                     "average_rating": book.get("average_rating"),
                     "ratings_count": book.get("ratings_count"),
+                    "cover_image": book.get("cover_image"),
+                    "isbn_10": book.get("isbn_10"),
+                    "isbn_13": book.get("isbn_13"),
                     "dominant_mood": book.get("dominant_mood"),
                     "sentiment_score": book.get("sentiment_score"),
                     "emotional_intensity": book.get("emotional_intensity"),
