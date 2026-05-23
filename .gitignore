@@ -21,7 +21,10 @@ tmp/
 output/
 media/books/pdfs/
 books_dataset_*.json
-!books_dataset_100k_real_covers.json
+data/*_seed.json
+*_TEST_RESULTS.json
+*_TEST_RESULTS.md
+TEST_RESULTS.*
 .vscode/
 .idea/
 .DS_Store
