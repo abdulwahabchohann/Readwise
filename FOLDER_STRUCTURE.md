@@ -3,7 +3,7 @@
 ## Before (key parts)
 
 ```text
-final-year-project/
+readwise/
 ├── accounts/
 │   └── tests.py
 ├── books_dataset_5000.json

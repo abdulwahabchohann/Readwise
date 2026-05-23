@@ -38,7 +38,7 @@ pip install -r requirements.txt
 
 ### 1. Run Deployment Tests
 ```bash
-cd /path/to/final-year-project
+cd /path/to/readwise
 source venv/bin/activate
 python DEPLOYMENT_TESTS.py
 ```

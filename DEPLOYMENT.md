@@ -113,8 +113,8 @@ Open a PythonAnywhere `Bash` console and run:
 
 ```bash
 cd ~
-git clone https://github.com/abdulwahabchohann/Readwise.git final-year-project
-cd final-year-project
+git clone https://github.com/abdulwahabchohann/Readwise.git readwise
+cd readwise
 python3.10 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
