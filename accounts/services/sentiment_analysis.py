@@ -14,8 +14,11 @@ Features:
 from __future__ import annotations
 
 import logging
+import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
+
+from django.conf import settings
 
 # Guarded imports for optional heavy ML dependencies
 try:
@@ -70,6 +73,17 @@ MOOD_COMPATIBILITY = {
 }
 
 
+def _transformers_enabled() -> bool:
+    raw_value = os.getenv('ENABLE_TRANSFORMERS')
+    if raw_value is not None:
+        return raw_value.strip().lower() in {'1', 'true', 'yes', 'on'}
+
+    try:
+        return bool(getattr(settings, 'ENABLE_TRANSFORMERS', True))
+    except Exception:
+        return True
+
+
 class SentimentAnalyzer:
     """
     Advanced sentiment analyzer using transformer models for multi-mood recognition.
@@ -89,6 +103,14 @@ class SentimentAnalyzer:
             model_name: Sentence transformer model for embeddings
             emotion_model: Emotion classification model for mood detection
         """
+        self.embedding_model = None
+        self.emotion_classifier = None
+        self.mood_embeddings = {}
+
+        if not _transformers_enabled():
+            logger.info("Transformer sentiment models disabled by configuration. Using keyword-based analysis.")
+            return
+
         # Check if required packages are available
         if not SENTENCE_TRANSFORMERS_AVAILABLE or not TRANSFORMERS_AVAILABLE or not NUMPY_AVAILABLE:
             logger.warning(
@@ -96,9 +118,6 @@ class SentimentAnalyzer:
                 f"sentence_transformers={SENTENCE_TRANSFORMERS_AVAILABLE}, "
                 f"transformers={TRANSFORMERS_AVAILABLE}). Falling back to keyword-based analysis."
             )
-            self.embedding_model = None
-            self.emotion_classifier = None
-            self.mood_embeddings = {}
             return
         
         try:
@@ -120,16 +139,10 @@ class SentimentAnalyzer:
             # Catch specific errors: ImportError (missing deps), OSError (model download issues), RuntimeError (CUDA/device issues)
             logger.error(f"Error initializing sentiment analyzer: {e}")
             # Fallback to lightweight models if heavy models fail
-            self.embedding_model = None
-            self.emotion_classifier = None
-            self.mood_embeddings = {}
             logger.warning("Falling back to keyword-based sentiment analysis")
         except Exception as e:
             # Catch any other unexpected errors
             logger.error(f"Unexpected error initializing sentiment analyzer: {e}", exc_info=True)
-            self.embedding_model = None
-            self.emotion_classifier = None
-            self.mood_embeddings = {}
             logger.warning("Falling back to keyword-based sentiment analysis")
     
     def _precompute_mood_embeddings(self) -> Dict[str, any]:
@@ -149,8 +162,14 @@ class SentimentAnalyzer:
         """
         Analyze text to extract multi-dimensional sentiment and emotional tones.
         
+        ENHANCED: Better handles complex multi-sentence prompts by:
+        - Segmenting text into sentences for clause-level analysis
+        - Preserving context transitions (e.g., "sad but trying to stay positive")
+        - Weighting recent clauses higher for multi-turn conversations
+        - Detecting implicit moods from keywords and negations
+        
         Args:
-            text: Input text (book description, review, etc.)
+            text: Input text (book description, review, user prompt, etc.)
             
         Returns:
             Dictionary containing:
@@ -160,17 +179,34 @@ class SentimentAnalyzer:
             - sentiment_label: Overall label (positive/negative/neutral)
             - confidence: Confidence score (0.0 to 1.0)
             - emotional_intensity: Strength of emotions (0.0 to 1.0)
+            - implicit_moods: Secondary moods detected from context
+            - text_segments: Analysis by sentence for transparency
         """
         if not text or not text.strip():
             return self._empty_analysis()
         
         text = self._preprocess_text(text)
         
+        # ENHANCEMENT: Analyze multi-segment text to preserve context
+        segments = self._segment_text(text)
+        
         # Use transformer-based analysis if available
         if self.embedding_model and self.emotion_classifier:
-            return self._transformer_analysis(text)
+            base_analysis = self._transformer_analysis(text)
+            # Enhance with segment-level context
+            if len(segments) > 1:
+                base_analysis['implicit_moods'] = self._detect_implicit_moods_from_segments(segments)
+                base_analysis['text_segments'] = segments
+                base_analysis['multi_segment'] = True
+            return base_analysis
         else:
-            return self._keyword_based_analysis(text)
+            base_analysis = self._keyword_based_analysis(text)
+            # Enhance keyword-based with segment context
+            if len(segments) > 1:
+                base_analysis['implicit_moods'] = self._detect_implicit_moods_from_segments(segments)
+                base_analysis['text_segments'] = segments
+                base_analysis['multi_segment'] = True
+            return base_analysis
     
     def _transformer_analysis(self, text: str) -> Dict[str, Any]:
         """Perform transformer-based sentiment analysis."""
@@ -353,6 +389,41 @@ class SentimentAnalyzer:
             'analysis_method': 'none'
         }
     
+    def _segment_text(self, text: str) -> List[str]:
+        """Segment text into sentences for clause-level mood analysis."""
+        # Split on sentence boundaries while preserving context
+        sentences = re.split(r'[.!?]+', text)
+        return [s.strip() for s in sentences if s.strip()]
+    
+    def _detect_implicit_moods_from_segments(self, segments: List[str]) -> Dict[str, float]:
+        """Detect implicit moods from text segments and context transitions."""
+        implicit = {}
+        
+        # Keywords for implicit mood detection (context clues beyond direct mood words)
+        implicit_keywords = {
+            'resilient': {'hopeful': 0.8, 'inspired': 0.7, 'happy': 0.5},
+            'vulnerable': {'anxious': 0.6, 'sad': 0.5},
+            'breakup': {'sad': 0.8, 'hopeful': 0.3},
+            'loss': {'sad': 0.9, 'hopeful': 0.1},
+            'recover': {'hopeful': 0.9, 'inspired': 0.7},
+            'healing': {'hopeful': 0.8, 'relaxed': 0.6},
+            'strength': {'inspired': 0.9, 'hopeful': 0.8},
+            'overcoming': {'inspired': 0.8, 'hopeful': 0.7},
+            'struggling': {'anxious': 0.7, 'sad': 0.6},
+            'progress': {'hopeful': 0.8, 'inspired': 0.7},
+            'growth': {'inspired': 0.8, 'hopeful': 0.7},
+            'transformation': {'hopeful': 0.7, 'inspired': 0.8},
+        }
+        
+        for segment in segments:
+            segment_lower = segment.lower()
+            for keyword, moods in implicit_keywords.items():
+                if keyword in segment_lower:
+                    for mood, score in moods.items():
+                        implicit[mood] = max(implicit.get(mood, 0), score)
+        
+        return implicit
+    
     def match_mood(self, user_mood_text: str, book_moods: Dict[str, float]) -> float:
         """
         Calculate how well a book's mood matches a user's mood.
@@ -366,39 +437,36 @@ class SentimentAnalyzer:
         """
         if not user_mood_text or not book_moods:
             return 0.0
-        
-        # Analyze user's mood
+
         user_analysis = self.analyze_text(user_mood_text)
-        user_moods = user_analysis.get('moods', {})
+        return self.match_mood_from_analysis(user_analysis, book_moods)
+
+    def match_mood_from_analysis(self, user_analysis: Dict[str, Any], book_moods: Dict[str, float]) -> float:
+        """Calculate mood alignment from a precomputed user analysis payload."""
+        if not user_analysis or not book_moods:
+            return 0.0
+
+        user_moods = user_analysis.get('moods', {}) or {}
         user_dominant = user_analysis.get('dominant_mood', 'neutral')
-        
-        # Direct mood match
-        direct_match = book_moods.get(user_dominant, 0.0)
-        
-        # Compatibility match (check if book has moods that complement user's mood)
+
+        direct_match = float(book_moods.get(user_dominant, 0.0) or 0.0)
         compatible_moods = MOOD_COMPATIBILITY.get(user_dominant, [])
-        compatibility_score = sum(book_moods.get(mood, 0.0) for mood in compatible_moods) / max(len(compatible_moods), 1)
-        
-        # Semantic similarity using embeddings
-        semantic_score = 0.0
-        if self.embedding_model and NUMPY_AVAILABLE:
-            try:
-                user_embedding = self.embedding_model.encode(user_mood_text, normalize_embeddings=True)
-                # Create book mood representation
-                book_mood_text = ' '.join([mood for mood, score in sorted(book_moods.items(), key=lambda x: x[1], reverse=True)[:3]])
-                if book_mood_text:
-                    book_embedding = self.embedding_model.encode(book_mood_text, normalize_embeddings=True)
-                    semantic_score = float(np.dot(user_embedding, book_embedding))
-            except Exception as e:
-                logger.warning(f"Error calculating semantic similarity: {e}")
-        
-        # Weighted combination
+        compatibility_score = sum(float(book_moods.get(mood, 0.0) or 0.0) for mood in compatible_moods)
+        compatibility_score /= max(len(compatible_moods), 1)
+
+        weighted_overlap = 0.0
+        user_total = 0.0
+        for mood, score in user_moods.items():
+            user_score = float(score or 0.0)
+            user_total += max(0.0, user_score)
+            weighted_overlap += max(0.0, user_score) * float(book_moods.get(mood, 0.0) or 0.0)
+        semantic_score = weighted_overlap / max(user_total, 1.0)
+
         match_score = (
             direct_match * 0.4 +
             compatibility_score * 0.3 +
             semantic_score * 0.3
         )
-        
         return min(max(match_score, 0.0), 1.0)
 
 

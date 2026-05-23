@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from pathlib import Path
 from typing import Any
 
 from django.conf import settings
+from django.core.cache import cache
 
-from .cover_utils import PLACEHOLDER_COVER_URL, normalize_cover
+from .cover_utils import PLACEHOLDER_COVER_URL, normalize_cover, get_isbn_based_cover_url
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +32,8 @@ def get_dataset_recommender(dataset_path: str):
 
 def _resolve_dataset_path() -> str:
     candidates = [
+        Path(settings.BASE_DIR) / "books_dataset_100k_real_covers.json",
+        Path(settings.BASE_DIR) / "books_dataset_100k_with_covers.json",
         Path(settings.BASE_DIR) / "books_dataset_5000.json",
         Path(settings.BASE_DIR) / "data" / "books_dataset_5000.json",
     ]
@@ -36,6 +41,48 @@ def _resolve_dataset_path() -> str:
         if candidate.exists():
             return str(candidate)
     return str(candidates[0])
+
+
+def _recommendation_mode() -> str:
+    mode = str(getattr(settings, 'RECOMMENDER_MODE', 'hybrid') or 'hybrid').strip().lower()
+    return mode if mode in {'hybrid', 'dataset', 'mood'} else 'hybrid'
+
+
+def _recommendation_cache_timeout() -> int:
+    try:
+        return max(0, int(getattr(settings, 'RECOMMENDATION_CACHE_TTL', 900)))
+    except (TypeError, ValueError):
+        return 900
+
+
+def _build_cache_key(user_mood: str, limit: int, improve_mood: bool) -> str:
+    dataset_path = Path(_resolve_dataset_path())
+    try:
+        dataset_marker = f"{dataset_path.name}:{int(dataset_path.stat().st_mtime)}"
+    except OSError:
+        dataset_marker = f"{dataset_path.name}:missing"
+
+    payload = json.dumps(
+        {
+            'mood': user_mood.strip().lower(),
+            'limit': limit,
+            'improve_mood': improve_mood,
+            'mode': _recommendation_mode(),
+            'dataset_marker': dataset_marker,
+        },
+        sort_keys=True,
+    )
+    digest = hashlib.sha256(payload.encode('utf-8')).hexdigest()
+    return f"recommendations:{digest}"
+
+
+def _engine_order() -> tuple[str, ...]:
+    mode = _recommendation_mode()
+    if mode == 'dataset':
+        return ('dataset', 'mood')
+    if mode == 'mood':
+        return ('mood', 'dataset')
+    return ('mood', 'dataset')
 
 
 def _coerce_score(value: Any) -> float:
@@ -70,12 +117,19 @@ def _normalize_mood_item(item: dict[str, Any]) -> dict[str, Any] | None:
         return None
 
     score = _coerce_score(item.get("sentiment_score"))
+    
+    # Use database cover if available, otherwise placeholder
+    # Note: OpenLibrary ISBN fallback skipped due to many 1px broken images
+    cover_image = normalize_cover(item.get("cover_image") or PLACEHOLDER_COVER_URL)
+    
     return {
         "book_id": item.get("book_id"),
         "title": title,
         "author": str(item.get("author") or "Author unknown").strip() or "Author unknown",
         "genre": _normalize_genre(item.get("genre")),
-        "cover_image": normalize_cover(item.get("cover_image") or PLACEHOLDER_COVER_URL),
+        "cover_image": cover_image,
+        "isbn_10": str(item.get("isbn_10") or "").strip(),
+        "isbn_13": str(item.get("isbn_13") or "").strip(),
         "dominant_mood": str(item.get("dominant_mood") or "").strip(),
         "recommendation_reason": str(
             item.get("recommendation_reason") or "This book is a strong mood-based match."
@@ -93,12 +147,19 @@ def _normalize_dataset_item(item: dict[str, Any]) -> dict[str, Any] | None:
         return None
 
     match_score = _coerce_score(item.get("score"))
+    
+    # Use database cover if available, otherwise placeholder
+    # Note: OpenLibrary ISBN fallback skipped due to many 1px broken images
+    cover_image = normalize_cover(item.get("cover_image") or PLACEHOLDER_COVER_URL)
+    
     return {
         "book_id": item.get("book_id"),
         "title": title,
         "author": str(item.get("author") or "Author unknown").strip() or "Author unknown",
         "genre": _normalize_genre(item.get("genres")),
-        "cover_image": normalize_cover(item.get("cover_image") or PLACEHOLDER_COVER_URL),
+        "cover_image": cover_image,
+        "isbn_10": str(item.get("isbn_10") or "").strip(),
+        "isbn_13": str(item.get("isbn_13") or "").strip(),
         "dominant_mood": str(item.get("dominant_mood") or "").strip(),
         "recommendation_reason": str(
             item.get("explanation") or "This book is a strong dataset-based fallback match."
@@ -142,33 +203,47 @@ def get_recommendations_for_mood(
     except (TypeError, ValueError) as exc:
         raise RecommendationUnavailableError("Invalid recommendation limit.") from exc
 
-    mood_error: Exception | None = None
-    try:
-        mood_items = get_mood_recommender().recommend_books(
-            user_mood=mood_text,
-            limit=limit_value,
-            improve_mood=improve_mood,
-            min_confidence=0.3,
-        )
-        normalized_mood_items = _normalize_items(mood_items, _normalize_mood_item)
-        if _recommendations_are_usable(normalized_mood_items):
-            return normalized_mood_items[:limit_value]
-        logger.warning("Mood recommender returned no usable recommendations for mood=%s", mood_text)
-    except Exception as exc:  # pragma: no cover - exercised via facade tests with monkeypatch
-        mood_error = exc
-        logger.warning("Mood recommender failed for mood=%s: %s", mood_text, exc)
+    cache_timeout = _recommendation_cache_timeout()
+    cache_key = _build_cache_key(mood_text, limit_value, improve_mood)
+    if cache_timeout:
+        cached = cache.get(cache_key)
+        if isinstance(cached, list):
+            return cached[:limit_value]
 
+    mood_error: Exception | None = None
     dataset_error: Exception | None = None
-    try:
-        dataset_path = _resolve_dataset_path()
-        dataset_items = get_dataset_recommender(dataset_path).recommend(mood_text, top_n=limit_value)
-        normalized_dataset_items = _normalize_items(dataset_items, _normalize_dataset_item)
-        if _recommendations_are_usable(normalized_dataset_items):
-            return normalized_dataset_items[:limit_value]
-        logger.warning("Dataset recommender returned no usable recommendations for mood=%s", mood_text)
-    except Exception as exc:  # pragma: no cover - exercised via facade tests with monkeypatch
-        dataset_error = exc
-        logger.warning("Dataset recommender failed for mood=%s: %s", mood_text, exc)
+
+    for engine in _engine_order():
+        if engine == 'mood':
+            try:
+                mood_items = get_mood_recommender().recommend_books(
+                    user_mood=mood_text,
+                    limit=limit_value,
+                    improve_mood=improve_mood,
+                    min_confidence=0.3,
+                )
+                normalized_mood_items = _normalize_items(mood_items, _normalize_mood_item)
+                if _recommendations_are_usable(normalized_mood_items):
+                    if cache_timeout:
+                        cache.set(cache_key, normalized_mood_items[:limit_value], cache_timeout)
+                    return normalized_mood_items[:limit_value]
+                logger.warning("Mood recommender returned no usable recommendations for mood=%s", mood_text)
+            except Exception as exc:  # pragma: no cover - exercised via facade tests with monkeypatch
+                mood_error = exc
+                logger.warning("Mood recommender failed for mood=%s: %s", mood_text, exc)
+        elif engine == 'dataset':
+            try:
+                dataset_path = _resolve_dataset_path()
+                dataset_items = get_dataset_recommender(dataset_path).recommend(mood_text, top_n=limit_value)
+                normalized_dataset_items = _normalize_items(dataset_items, _normalize_dataset_item)
+                if _recommendations_are_usable(normalized_dataset_items):
+                    if cache_timeout:
+                        cache.set(cache_key, normalized_dataset_items[:limit_value], cache_timeout)
+                    return normalized_dataset_items[:limit_value]
+                logger.warning("Dataset recommender returned no usable recommendations for mood=%s", mood_text)
+            except Exception as exc:  # pragma: no cover - exercised via facade tests with monkeypatch
+                dataset_error = exc
+                logger.warning("Dataset recommender failed for mood=%s: %s", mood_text, exc)
 
     if mood_error or dataset_error:
         raise RecommendationUnavailableError("Unable to generate recommendations at this time.") from (

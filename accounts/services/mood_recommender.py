@@ -10,14 +10,14 @@ from __future__ import annotations
 
 import logging
 import re
-import random
 from decimal import Decimal
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from functools import lru_cache
 
+from django.conf import settings
 from django.db.models import Case, IntegerField, Q, QuerySet, Value, When
 from accounts.models import Book
-from accounts.services.cover_utils import PLACEHOLDER_COVER_URL, normalize_cover
+from accounts.services.cover_utils import PLACEHOLDER_COVER_URL, is_usable_cover_url, normalize_cover
 from accounts.services.sentiment_analysis import get_sentiment_analyzer, MOOD_COMPATIBILITY
 from accounts.services.google_books import search_google_books, GoogleBooksError
 
@@ -88,7 +88,7 @@ class MoodRecommender:
             )
 
         # Get candidate books
-        candidate_books = self._get_candidate_books(user_dominant_mood, improve_mood)
+        candidate_books = self._get_candidate_books(user_dominant_mood, improve_mood, limit=limit)
 
         if not candidate_books:
             logger.warning("No candidate books found")
@@ -98,25 +98,35 @@ class MoodRecommender:
 
         # Score and rank books
         scored_books = []
+        all_scored_books = []
         for book in candidate_books:
             score, reason, book_dominant_mood = self._score_book(
                 book,
                 user_mood,
+                user_analysis,
                 user_dominant_mood,
                 user_moods,
                 improve_mood,
             )
 
-            if score >= effective_min_confidence:
-                scored_books.append({
-                    'book': book,
-                    'score': score,
-                    'reason': reason,
-                    'dominant_mood': book_dominant_mood,
-                })
+            item = {
+                'book': book,
+                'score': score,
+                'reason': reason,
+                'dominant_mood': book_dominant_mood,
+            }
+            all_scored_books.append(item)
 
-        # Sort by score (descending) with a small random jitter to avoid identical ordering every time
-        scored_books.sort(key=lambda x: (x['score'] + random.uniform(0, 0.02)), reverse=True)
+            if score >= effective_min_confidence:
+                scored_books.append(item)
+
+        scored_books.sort(key=self._score_sort_key)
+        if not scored_books and all_scored_books:
+            logger.info(
+                "recommend_books: no items met min_confidence %.2f; using best available candidates instead.",
+                effective_min_confidence,
+            )
+            scored_books = sorted(all_scored_books, key=self._score_sort_key)
 
         deduped_books = self._dedupe_scored_books(scored_books)
         diversified_books = self._diversify_recommendations(deduped_books, limit)
@@ -188,6 +198,24 @@ class MoodRecommender:
             unique.append(item)
         return unique
 
+    def _score_sort_key(self, item: Dict) -> tuple:
+        book = item['book']
+        average_rating = book.average_rating
+        if isinstance(average_rating, Decimal):
+            average_rating = float(average_rating)
+        average_rating = average_rating or 0.0
+        ratings_count = book.ratings_count or 0
+        title = (book.title or '').lower()
+        return (-float(item['score']), -float(average_rating), -int(ratings_count), title)
+
+    def _candidate_limit(self, requested_limit: int) -> int:
+        configured = getattr(settings, 'RECOMMENDATION_CANDIDATE_LIMIT', 100)
+        try:
+            configured_limit = int(configured)
+        except (TypeError, ValueError):
+            configured_limit = 100
+        return max(requested_limit * 4, max(10, configured_limit))
+
     def _diversify_recommendations(self, scored_books: List[Dict], limit: int) -> List[Dict]:
         """
         Provide varied recommendations by limiting repeats from the same author/mood
@@ -203,11 +231,8 @@ class MoodRecommender:
         author_seen: set[str] = set()
         mood_counts: Dict[str, int] = {}
 
-        # Always keep the top 1-2 highest scores, then mix in shuffled remainder for variety.
-        guaranteed = pool[:2]
-        remainder = pool[2:]
-        random.shuffle(remainder)
-        blended_pool = guaranteed + remainder
+        # Keep the pool deterministic so identical inputs are cache-friendly.
+        blended_pool = pool
 
         for item in blended_pool:
             if len(picks) >= limit:
@@ -241,6 +266,13 @@ class MoodRecommender:
     def _cover_image_for(self, book: Book) -> str:
         """
         Choose the best available cover image with multiple fallbacks.
+        
+        ENHANCED: Improved fallback chain:
+        1. Database cover_image (if valid)
+        2. ISBN-based OpenLibrary covers
+        3. Google Books API (if LIVE_COVER_LOOKUPS enabled)
+        4. Database sentiment-based synthetic cover selection
+        5. Placeholder with diagnostic logging
         """
         cover = book.cover_image if isinstance(book.cover_image, str) else ''
         cover = cover.strip()
@@ -253,7 +285,7 @@ class MoodRecommender:
             book_id=book.id,
         )
     
-    def _get_candidate_books(self, user_mood: str, improve_mood: bool) -> QuerySet[Book]:
+    def _get_candidate_books(self, user_mood: str, improve_mood: bool, *, limit: int = 5) -> QuerySet[Book]:
         """
         Get candidate books based on user mood and improvement preference.
         
@@ -324,13 +356,14 @@ class MoodRecommender:
             )
         ).order_by('-has_mood_metadata', '-average_rating', '-ratings_count')
 
-        # PERFORMANCE: Use a larger candidate pool to improve variety.
-        return base_query[:500]
+        # Keep candidate scanning bounded so request cost scales predictably.
+        return base_query[:self._candidate_limit(limit)]
     
     def _score_book(
         self,
         book: Book,
         user_mood_text: str,
+        user_analysis: Dict[str, Any],
         user_dominant_mood: str,
         user_moods: Dict[str, float],
         improve_mood: bool
@@ -380,11 +413,22 @@ class MoodRecommender:
             
             match_score = (compatibility_score * 0.6) + (positive_boost * 0.4)
             
+            # ENHANCEMENT: Generate richer reason using implicit moods
+            implicit_moods = user_analysis.get('implicit_moods', {})
+            top_implicit = sorted(implicit_moods.items(), key=lambda x: x[1], reverse=True)[:1] if implicit_moods else []
+            
             # Generate reason
             top_book_moods = sorted(book_moods.items(), key=lambda x: x[1], reverse=True)[:2]
             mood_descriptions = [f"{mood}" for mood, score in top_book_moods if score > 0.2]
             
-            if mood_descriptions:
+            if top_implicit and mood_descriptions:
+                implicit_mood, _ = top_implicit[0]
+                reason = (
+                    f"This {', '.join(mood_descriptions)}-themed book can help with your {implicit_mood} "
+                    f"tendencies by offering perspectives on resilience and emotional growth. "
+                    f"It addresses themes that promote transformation and positive outlook."
+                )
+            elif mood_descriptions:
                 reason = (
                     f"This book evokes {', '.join(mood_descriptions)} emotions, which can help "
                     f"improve your current {user_dominant_mood} mood. "
@@ -398,9 +442,12 @@ class MoodRecommender:
         else:
             # Score based on direct match
             direct_match = book_moods.get(user_dominant_mood, 0.0)
-            
-            # Also consider semantic similarity
-            semantic_match = self.analyzer.match_mood(user_mood_text, book_moods)
+
+            semantic_matcher = getattr(self.analyzer, 'match_mood_from_analysis', None)
+            if callable(semantic_matcher):
+                semantic_match = semantic_matcher(user_analysis, book_moods)
+            else:
+                semantic_match = self.analyzer.match_mood(user_mood_text, book_moods)
             
             match_score = (direct_match * 0.7) + (semantic_match * 0.3)
             
@@ -492,12 +539,9 @@ class MoodRecommender:
         def _sanitize(url: str) -> str:
             if not url or not isinstance(url, str):
                 return ''
-            url = url.strip()
-            if url.lower() == 'null':
+            if not is_usable_cover_url(url):
                 return ''
-            if url.startswith('http://'):
-                url = 'https://' + url[len('http://'):]
-            return url
+            return normalize_cover(url)
 
         existing = _sanitize(cover)
         if existing:
@@ -541,29 +585,32 @@ class MoodRecommender:
 
         logger.info("cover.resolve.skip book_id=%s reason=no_isbn", book_id)
 
-        google_cover, google_reason = self._lookup_google_cover(
-            title,
-            author,
-            book_id=book_id,
-            placeholder=placeholder,
-        )
-        if google_reason == 'google_ok':
-            self._record_cover_trace(
+        if getattr(settings, 'LIVE_COVER_LOOKUPS', False):
+            google_cover, google_reason = self._lookup_google_cover(
+                title,
+                author,
                 book_id=book_id,
-                title=title,
-                source='google_books',
-                resolved=google_cover,
-                reason=google_reason,
-                cover=cover,
-                isbn_10=isbn_10,
-                isbn_13=isbn_13,
+                placeholder=placeholder,
             )
-            logger.info(
-                "cover.resolve.branch book_id=%s source=google_books resolved=%s",
-                book_id,
-                google_cover,
-            )
-            return normalize_cover(google_cover)
+            if google_reason == 'google_ok':
+                self._record_cover_trace(
+                    book_id=book_id,
+                    title=title,
+                    source='google_books',
+                    resolved=google_cover,
+                    reason=google_reason,
+                    cover=cover,
+                    isbn_10=isbn_10,
+                    isbn_13=isbn_13,
+                )
+                logger.info(
+                    "cover.resolve.branch book_id=%s source=google_books resolved=%s",
+                    book_id,
+                    google_cover,
+                )
+                return normalize_cover(google_cover)
+        else:
+            google_reason = 'live_lookup_disabled'
 
         self._record_cover_trace(
             book_id=book_id,

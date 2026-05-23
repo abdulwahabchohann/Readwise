@@ -30,6 +30,20 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return value.strip().lower() in {'1', 'true', 'yes', 'on'}
 
 
+def _env_int(name: str, default: int, *, minimum: int | None = None) -> int:
+    value = os.getenv(name)
+    if value is None:
+        result = default
+    else:
+        try:
+            result = int(value.strip())
+        except (TypeError, ValueError):
+            result = default
+    if minimum is not None:
+        result = max(minimum, result)
+    return result
+
+
 def _env_list(name: str, default: list[str] | None = None) -> list[str]:
     raw_value = os.getenv(name, '')
     if not raw_value:
@@ -238,5 +252,14 @@ GOOGLE_OAUTH = {
 }
 
 GOOGLE_BOOKS_API_KEY = os.getenv('GOOGLE_BOOKS_API_KEY', '')
+
+RECOMMENDER_MODE = (os.getenv('RECOMMENDER_MODE') or 'hybrid').strip().lower()
+if RECOMMENDER_MODE not in {'hybrid', 'dataset', 'mood'}:
+    RECOMMENDER_MODE = 'hybrid'
+
+ENABLE_TRANSFORMERS = _env_bool('ENABLE_TRANSFORMERS', default=not IS_PRODUCTION)
+RECOMMENDATION_CACHE_TTL = _env_int('RECOMMENDATION_CACHE_TTL', 900, minimum=0)
+RECOMMENDATION_CANDIDATE_LIMIT = _env_int('RECOMMENDATION_CANDIDATE_LIMIT', 100, minimum=10)
+LIVE_COVER_LOOKUPS = _env_bool('LIVE_COVER_LOOKUPS', default=False)
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'

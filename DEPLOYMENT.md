@@ -141,6 +141,11 @@ GOOGLE_CLIENT_SECRET=<google-client-secret>
 GOOGLE_REDIRECT_URI=https://<username>.pythonanywhere.com/accounts/oauth2callback/
 GOOGLE_BOOKS_API_KEY=<google-books-key>
 SECURE_HSTS_PRELOAD=False
+ENABLE_TRANSFORMERS=False
+RECOMMENDER_MODE=dataset
+RECOMMENDATION_CACHE_TTL=900
+RECOMMENDATION_CANDIDATE_LIMIT=100
+LIVE_COVER_LOOKUPS=False
 ```
 
 Notes:
@@ -154,6 +159,7 @@ cd ~/final-year-project
 source .venv/bin/activate
 python manage.py migrate
 python manage.py collectstatic --noinput
+python manage.py check_recommendation_readiness
 ```
 
 ## 5) Configure WSGI on PythonAnywhere
@@ -203,6 +209,15 @@ python manage.py loaddata data/pythonanywhere_seed.json
 python manage.py shell -c "from django.contrib.sites.models import Site; Site.objects.update_or_create(id=1, defaults={'domain':'<username>.pythonanywhere.com','name':'readwise'})"
 ```
 
+Optional but recommended before copying data to PythonAnywhere:
+
+```bash
+python manage.py backfill_book_metadata --force
+python manage.py backfill_book_covers
+python manage.py export_books_dataset
+python manage.py check_recommendation_readiness --fail-on-issues
+```
+
 ## 8) Google OAuth cutover
 
 In Google Cloud Console OAuth client:
@@ -231,6 +246,8 @@ Test:
 - `DisallowedHost`: fix `ALLOWED_HOSTS` exact domain.
 - CSRF failure: fix `CSRF_TRUSTED_ORIGINS` with full `https://` origin.
 - Static missing: re-run `collectstatic`, verify static mapping path.
+- First recommendation request is slow: verify `ENABLE_TRANSFORMERS=False` and `RECOMMENDER_MODE=dataset` in `.env`, then reload the web app.
+- Covers missing or broken: run `python manage.py backfill_book_covers` locally, re-export `books_dataset_5000.json`, and redeploy the refreshed data.
 - OAuth redirect mismatch: check Google Console URI and `.env` URI character-for-character.
 - Network/API limits on free plan: if blocked, consider upgrading plan.
 
