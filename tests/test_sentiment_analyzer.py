@@ -4,7 +4,7 @@ Comprehensive Test Suite for Sentiment Analysis Module
 
 import json
 import unittest
-from sentiment_analyzer import (
+from readwise.sentiment_analyzer import (
     EmotionAnalyzer,
     BookProcessor,
     SentimentScorer,
