@@ -3,9 +3,10 @@
 This quick guide gets ReadWise running locally.
 
 1. Create/activate a virtual environment
-   - `python -m venv venv`
-   - Windows: `venv\Scripts\activate`
-   - Linux/Mac: `source venv/bin/activate`
+   - `python -m venv .venv`
+   - Windows PowerShell: `.venv\Scripts\Activate.ps1`
+   - Windows cmd: `.venv\Scripts\activate.bat`
+   - Linux/Mac: `source .venv/bin/activate`
 2. Install dependencies: `pip install -r requirements.txt`
 3. Copy environment variables: `cp .env.example .env` (or create `.env` manually) and update values.
 4. Apply migrations: `python manage.py migrate`

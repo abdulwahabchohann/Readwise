@@ -9,6 +9,12 @@ except ImportError:
     dj_database_url = None
 
 try:
+    from decouple import config as env_config  # type: ignore
+except ImportError:  # pragma: no cover - fallback when python-decouple is missing
+    def env_config(name: str, default: str = '') -> str:
+        return os.getenv(name, default)
+
+try:
     from dotenv import load_dotenv  # type: ignore
 except ImportError:  # pragma: no cover - fallback when python-dotenv is missing
     def load_dotenv(path, override=False):
@@ -101,6 +107,7 @@ INSTALLED_APPS = [
     'allauth.socialaccount.providers.google',
     'rest_framework',
     'accounts',
+    'recommendations',
 ]
 
 MIDDLEWARE = [
@@ -252,6 +259,9 @@ GOOGLE_OAUTH = {
 }
 
 GOOGLE_BOOKS_API_KEY = os.getenv('GOOGLE_BOOKS_API_KEY', '')
+OPENAI_API_KEY = env_config('OPENAI_API_KEY', default='')
+OPENAI_RECOMMENDATION_MODEL = env_config('OPENAI_RECOMMENDATION_MODEL', default='gpt-4o')
+OPENAI_RECOMMENDATION_TIMEOUT = _env_int('OPENAI_RECOMMENDATION_TIMEOUT', 30, minimum=5)
 
 RECOMMENDER_MODE = (os.getenv('RECOMMENDER_MODE') or 'hybrid').strip().lower()
 if RECOMMENDER_MODE not in {'hybrid', 'dataset', 'mood'}:

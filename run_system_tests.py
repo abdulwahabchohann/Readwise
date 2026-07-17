@@ -186,9 +186,9 @@ def test_recommendation_api():
             
             start_time = time.time()
             recommendations = get_recommendations_for_mood(
-                mood=mood,
+                user_mood=mood,
+                limit=10,
                 improve_mood=True,
-                mode='hybrid'
             )
             elapsed = time.time() - start_time
             
@@ -374,7 +374,7 @@ def test_performance():
         times = []
         for mood in test_moods:
             start = time.time()
-            recommendations = get_recommendations_for_mood(mood, improve_mood=True)
+            recommendations = get_recommendations_for_mood(mood, limit=5, improve_mood=True)
             elapsed = time.time() - start
             times.append(elapsed)
             print_success(f"  {mood}: {elapsed:.4f}s")

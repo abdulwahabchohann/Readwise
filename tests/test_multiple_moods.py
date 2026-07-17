@@ -16,27 +16,28 @@ test_cases = [
     "I'm bored and want something fun"
 ]
 
-rec = get_mood_recommender()
+if __name__ == '__main__':
+    rec = get_mood_recommender()
 
-for mood in test_cases:
-    print(f"\n{'='*70}")
-    print(f"Mood: {mood}")
-    print('='*70)
-    
-    recommendations = rec.recommend_books(mood, limit=5)
-    
-    print(f"Found {len(recommendations)} recommendations:\n")
-    
-    titles = set()
-    for i, r in enumerate(recommendations, 1):
-        # Check for duplicates
-        normalized = r['title'].lower()
-        if normalized in titles:
-            print(f"❌ DUPLICATE: {r['title']}")
-        else:
-            titles.add(normalized)
-            print(f"{i}. {r['title']}")
-            print(f"   Author: {r['author']}")
-            print(f"   Match: {r['sentiment_score']*100:.0f}%")
-            print(f"   Mood: {r['dominant_mood']}")
-            print()
+    for mood in test_cases:
+        print(f"\n{'='*70}")
+        print(f"Mood: {mood}")
+        print('='*70)
+        
+        recommendations = rec.recommend_books(mood, limit=5)
+        
+        print(f"Found {len(recommendations)} recommendations:\n")
+        
+        titles = set()
+        for i, r in enumerate(recommendations, 1):
+            # Check for duplicates
+            normalized = r['title'].lower()
+            if normalized in titles:
+                print(f"❌ DUPLICATE: {r['title']}")
+            else:
+                titles.add(normalized)
+                print(f"{i}. {r['title']}")
+                print(f"   Author: {r['author']}")
+                print(f"   Match: {r['sentiment_score']*100:.0f}%")
+                print(f"   Mood: {r['dominant_mood']}")
+                print()

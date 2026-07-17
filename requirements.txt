@@ -23,6 +23,11 @@ cryptography>=41.0.0
 
 # Environment Variables
 python-dotenv>=1.0.0
+python-decouple>=3.8
+
+# Conversational LLM recommendations
+openai>=1.55.0
+rapidfuzz>=3.9.0
 
 # Rate limiting and caching
 django-ratelimit>=4.1.0

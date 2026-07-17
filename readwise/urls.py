@@ -9,5 +9,6 @@ urlpatterns = [
     path('accounts/oauth2callback/', accounts_views.google_callback),
 
     # Accounts app
+    path('', include('recommendations.urls')),
     path('', include('accounts.urls')),
 ]

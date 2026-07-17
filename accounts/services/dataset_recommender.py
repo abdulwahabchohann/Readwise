@@ -244,15 +244,79 @@ class DatasetMoodRecommender:
 
         user_profile = self.analyze_user_mood(user_text)
         user_vector = _vectorize(user_profile.mood_scores)
+        
+        limit_val = max(top_n, 0)
+        if limit_val == 0:
+            return []
 
-        scored = []
+        # Optimization: Score all books without allocating full dicts or building explanations
+        scored_candidates = []
+        
+        # Pull weights and profile stats
+        w_mood = self.weights["mood"]
+        w_sentiment = self.weights["sentiment"]
+        w_intensity = self.weights["intensity"]
+        
+        user_sentiment = user_profile.sentiment_score
+        user_intensity = user_profile.emotional_intensity
+
         for book in self._books:
-            score, components = self._score_book(user_profile, user_vector, book)
+            # Inline _score_book logic to avoid overhead
+            book_vector = book.get("_mood_vector") or _vectorize(book.get("mood_scores", {}))
+            
+            # Inline _cosine_similarity
+            dot = 0.0
+            norm_a = 0.0
+            norm_b = 0.0
+            for av, bv in zip(user_vector, book_vector):
+                dot += av * bv
+                norm_a += av * av
+                norm_b += bv * bv
+            mood_similarity = dot / math.sqrt(norm_a * norm_b) if (norm_a > 0.0 and norm_b > 0.0) else 0.0
+
+            # Inline _sentiment_alignment
+            book_sentiment = _safe_float(book.get("sentiment_score"), 0.0) or 0.0
+            sentiment_alignment = max(0.0, 1.0 - abs(book_sentiment - user_sentiment) / 2.0)
+
+            # Inline _intensity_alignment
+            book_intensity = _safe_float(book.get("emotional_intensity"), 0.0) or 0.0
+            intensity_alignment = max(0.0, 1.0 - abs(book_intensity - user_intensity))
+
+            score = (
+                w_mood * mood_similarity
+                + w_sentiment * sentiment_alignment
+                + w_intensity * intensity_alignment
+            )
+            
+            avg_rating = _safe_float(book.get("average_rating"), 0.0) or 0.0
+            ratings_count = int(book.get("ratings_count") or 0)
+            title = str(book.get("title") or "")
+            
+            scored_candidates.append((score, avg_rating, ratings_count, title, book, mood_similarity, sentiment_alignment, intensity_alignment))
+
+        # Sort based on score, average_rating, ratings_count, and title
+        scored_candidates.sort(
+            key=lambda item: (
+                -item[0],      # score
+                -item[1],      # average_rating
+                -item[2],      # ratings_count
+                item[3],       # title
+            )
+        )
+
+        # Build final detailed dicts only for top N items
+        results = []
+        for score, avg_rating, ratings_count, title, book, mood_sim, sent_align, int_align in scored_candidates[:limit_val]:
+            components = {
+                "mood_similarity": round(mood_sim, 4),
+                "sentiment_alignment": round(sent_align, 4),
+                "intensity_alignment": round(int_align, 4),
+            }
             explanation = self._build_explanation(user_profile, book, components)
-            scored.append(
+            results.append(
                 {
                     "book_id": book.get("book_id"),
-                    "title": book.get("title"),
+                    "title": title,
                     "author": book.get("author"),
                     "genres": book.get("genres", []),
                     "description": book.get("description"),
@@ -270,16 +334,7 @@ class DatasetMoodRecommender:
                 }
             )
 
-        scored.sort(
-            key=lambda item: (
-                -item["score"],
-                -(item.get("average_rating") or 0.0),
-                -(item.get("ratings_count") or 0),
-                str(item.get("title") or ""),
-            )
-        )
-
-        return scored[: max(top_n, 0)]
+        return results
 
     def _score_book(
         self,

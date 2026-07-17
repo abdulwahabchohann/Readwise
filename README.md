@@ -169,13 +169,15 @@ Place screenshot here: /docs/screenshots/install-step-1-clone.png
 #### Step 2: Create Virtual Environment
 ```bash
 # Using venv
-python -m venv venv
+python -m venv .venv
 
 # Activate it
 # On Windows:
-venv\Scripts\activate
+.venv\Scripts\Activate.ps1
+# If you are using cmd.exe instead:
+.venv\Scripts\activate.bat
 # On Linux/Mac:
-source venv/bin/activate
+source .venv/bin/activate
 ```
 > **Screenshot**: Virtual environment activation
 ```
@@ -1083,6 +1085,42 @@ For issues, questions, or suggestions:
 - Open an issue on GitHub
 - Contact the development team
 - Check existing documentation
+
+---
+
+## Advanced Conversational Recommendations
+
+ReadWise includes an AI-powered recommendation page at:
+
+```text
+/recommend/advanced/
+```
+
+The async API endpoint is:
+
+```text
+POST /api/recommend/advanced/
+```
+
+Payload:
+
+```json
+{
+  "user_prompt": "I am sad and feeling lonely"
+}
+```
+
+The endpoint returns exactly five recommendation cards when possible. It uses `OPENAI_API_KEY` with the configured OpenAI model for emotionally-aware, conversational recommendations, then fuzzy-matches suggested titles/authors against the local `Book` database. Books found locally include `in_library: true`; otherwise they are returned as external suggestions.
+
+Required environment variables:
+
+```text
+OPENAI_API_KEY=your-openai-api-key
+OPENAI_RECOMMENDATION_MODEL=gpt-4o
+OPENAI_RECOMMENDATION_TIMEOUT=30
+```
+
+If OpenAI is unavailable or the key is missing, the API falls back to deterministic keyword/catalog recommendations and still returns local library matches where available. Identical or near-identical prompts are cached for one hour, and requests are limited to 10 per user or anonymous client per hour.
 
 ---
 
