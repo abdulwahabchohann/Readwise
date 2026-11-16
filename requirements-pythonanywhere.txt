@@ -1,0 +1,22 @@
+# Lean runtime dependencies for PythonAnywhere free-plan deployment.
+# Excludes heavy ML/training/test packages that exceed disk quota.
+
+# Django app runtime
+Django>=5.2,<6.0
+djangorestframework>=3.14.0
+django-allauth>=0.57.0
+django-ratelimit>=4.1.0
+python-dotenv>=1.0.0
+
+# OAuth / HTTP
+requests>=2.31.0
+urllib3>=2.0.0
+certifi>=2023.7.22
+idna>=3.4
+charset-normalizer>=3.3.0
+PyJWT>=2.8.0
+cryptography>=41.0.0
+
+# Optional app features that are still lightweight enough to keep
+Pillow>=10.0.0
+PyPDF2>=3.0.0

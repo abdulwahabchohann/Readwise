@@ -1,0 +1,86 @@
+{% extends 'base.html' %}
+{% load static %}
+
+{% block title %}AI Book Search - ReadWise{% endblock %}
+
+{% block extra_css %}
+<link rel="stylesheet" href="{% static 'css/advanced_recommend.css' %}">
+{% endblock %}
+
+{% block content %}
+<section
+    class="advanced-recommend"
+    data-advanced-recommend
+    data-api-url="{% url 'advanced_recommend' %}"
+    data-authenticated="{{ user.is_authenticated|yesno:'true,false' }}"
+>
+    <div class="advanced-recommend__layout">
+        <aside class="advanced-history" aria-label="Recent prompts">
+            <div class="advanced-history__header">
+                <h2>Recent</h2>
+                <button type="button" class="advanced-icon-button" data-clear-history aria-label="Clear recent prompts">
+                    <i class="fas fa-trash" aria-hidden="true"></i>
+                </button>
+            </div>
+            <div class="advanced-history__empty" data-history-empty>No recent prompts</div>
+            <div class="advanced-history__list" data-history-list></div>
+        </aside>
+
+        <div class="advanced-workspace">
+            <div class="advanced-search-band">
+                <div class="advanced-title-row">
+                    <div>
+                        <p class="advanced-kicker">ReadWise AI</p>
+                        <h1>Find books for this exact moment</h1>
+                    </div>
+                    <button type="button" class="advanced-secondary-button" data-new-search>
+                        <i class="fas fa-pen" aria-hidden="true"></i>
+                        New Search
+                    </button>
+                </div>
+
+                <form class="advanced-form" data-advanced-form>
+                    {% csrf_token %}
+                    <label for="advanced-prompt">Your prompt</label>
+                    <textarea
+                        id="advanced-prompt"
+                        name="user_prompt"
+                        rows="5"
+                        placeholder="Tell me anything — your mood, a topic, a question, or how you're feeling..."
+                        data-prompt-input
+                        required
+                    ></textarea>
+                    <div class="advanced-form__actions">
+                        <button type="submit" class="advanced-submit-button">
+                            <i class="fas fa-sparkles" aria-hidden="true"></i>
+                            Find My Books
+                        </button>
+                        <div class="advanced-thinking" data-thinking hidden>
+                            <span></span>
+                            <span></span>
+                            <span></span>
+                        </div>
+                    </div>
+                </form>
+            </div>
+
+            <div class="advanced-alert" data-error hidden></div>
+
+            <section class="advanced-results" aria-live="polite" data-results hidden>
+                <div class="advanced-results__header">
+                    <div>
+                        <p class="advanced-kicker">Recommendations</p>
+                        <h2>Your 5 book matches</h2>
+                    </div>
+                    <span class="advanced-source-pill" data-response-source></span>
+                </div>
+                <div class="advanced-card-list" data-card-list></div>
+            </section>
+        </div>
+    </div>
+</section>
+{% endblock %}
+
+{% block extra_js %}
+<script src="{% static 'js/advanced_recommend.js' %}"></script>
+{% endblock %}

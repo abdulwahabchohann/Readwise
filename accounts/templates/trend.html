@@ -1,0 +1,32 @@
+{% extends 'base.html' %}
+{% load static %}
+
+{% block title %}ReadWise - Trending Books{% endblock %}
+
+{% block extra_css %}
+<link rel="stylesheet" href="{% static 'css/home.css' %}">
+{% endblock %}
+
+{% block content %}
+<section class="trending-books">
+    <div class="section-header">
+        <div>
+            <h2>Top Trending Books</h2>
+            <p class="section-caption">{{ total_trending }} titles readers can't put down.</p>
+        </div>
+    </div>
+
+    {% if trending_books %}
+        <div class="book-grid" aria-label="Trending books">
+            {% for book in trending_books %}
+                {% include 'components/book_card.html' with book=book %}
+            {% endfor %}
+        </div>
+    {% else %}
+        <div class="empty-state">
+            <h3>No trending data yet</h3>
+            <p>Add books and ratings to surface popular titles.</p>
+        </div>
+    {% endif %}
+</section>
+{% endblock %}
