@@ -190,8 +190,15 @@ def test_facade_raises_when_both_recommenders_fail(monkeypatch):
         def recommend(self, *args, **kwargs):
             raise RuntimeError('dataset path failed')
 
+    def fail_open_library(*args, **kwargs):
+        raise RuntimeError('Open Library path failed')
+
     monkeypatch.setattr('accounts.services.recommendation_facade.get_mood_recommender', lambda: StubMoodRecommender())
     monkeypatch.setattr('accounts.services.recommendation_facade.get_dataset_recommender', lambda *args, **kwargs: StubDatasetRecommender())
+    monkeypatch.setattr(
+        'accounts.services.recommendation_facade._get_open_library_recommendations',
+        fail_open_library,
+    )
 
     with pytest.raises(RecommendationUnavailableError):
         get_recommendations_for_mood('I feel anxious', limit=3, improve_mood=True)

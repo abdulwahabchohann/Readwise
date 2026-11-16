@@ -49,6 +49,7 @@ CANONICAL_CATEGORIES: Sequence[str] = [
 GOOGLE_API_ENDPOINT = 'https://www.googleapis.com/books/v1/volumes'
 OPEN_LIBRARY_SUBJECTS_URL = 'https://openlibrary.org/subjects.json'
 OPEN_LIBRARY_SUBJECT_DETAIL_URL = 'https://openlibrary.org/subjects/{slug}.json'
+OPEN_LIBRARY_SEARCH_URL = 'https://openlibrary.org/search.json'
 GOOGLE_TIMEOUT = 3.0
 OPEN_LIBRARY_TIMEOUT = 3.0
 MAX_RETRIES = 1
@@ -352,6 +353,43 @@ def fetch_open_library_books(slug: str, page: int) -> List[BookPayload]:
             )
         )
     return normalised
+
+
+def search_open_library_books(query: str, limit: int = 8) -> List[BookPayload]:
+    """Search Open Library without requiring an API key."""
+    if not query.strip():
+        return []
+    data = _http_get_json(
+        OPEN_LIBRARY_SEARCH_URL,
+        params={'q': query.strip(), 'limit': max(1, min(limit, 40))},
+        timeout=OPEN_LIBRARY_TIMEOUT,
+        retries=MAX_RETRIES,
+    )
+    if not data:
+        return []
+
+    results: List[BookPayload] = []
+    for document in data.get('docs', []):
+        if not isinstance(document, dict) or not document.get('key'):
+            continue
+        cover_id = document.get('cover_i')
+        results.append(
+            BookPayload(
+                id=f"ol:{str(document['key']).strip('/')}",
+                title=document.get('title') or 'Untitled',
+                authors=list(document.get('author_name') or []),
+                description=None,
+                categories=list(document.get('subject') or [])[:10],
+                thumbnail=(
+                    f"https://covers.openlibrary.org/b/id/{cover_id}-M.jpg"
+                    if cover_id else None
+                ),
+                info_url=f"https://openlibrary.org{document['key']}",
+                published_year=document.get('first_publish_year'),
+                source='openlibrary',
+            )
+        )
+    return results
 
 
 def fetch_books_for_category(slug: str, display_name: str, page: int) -> List[dict]:
