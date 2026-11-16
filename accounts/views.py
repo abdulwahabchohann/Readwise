@@ -2,6 +2,7 @@ import json
 import logging
 import re
 import secrets
+from dataclasses import asdict
 from pathlib import Path
 from decimal import Decimal
 from urllib.error import HTTPError, URLError
@@ -36,6 +37,7 @@ from .services.external import (
     fetch_books_for_category,
     get_cached_books,
     get_cached_category_list,
+    search_open_library_books,
 )
 from .services.cover_utils import PLACEHOLDER_COVER_URL, normalize_cover
 from .services.google_books import GoogleBook, GoogleBooksError, search_google_books
@@ -372,23 +374,29 @@ def category_detail(request, slug):
         raise Http404("Unknown category")
 
     display_name = category_map[slug]
+    source_name = 'Google Books'
     try:
         results = search_google_books(f"subject:{display_name}", max_results=40, language="en")
     except GoogleBooksError as exc:
         logger.warning("Google Books search failed for category %s: %s", slug, exc)
-        results = []
+        results = search_open_library_books(display_name, limit=16)
+        source_name = 'Open Library'
 
     book_cards = []
     for item in results:
-        if not getattr(item, 'identifier', None):
-            continue
-        book_cards.append(_normalize_google_book(item))
+        if getattr(item, 'identifier', None):
+            book_cards.append(_normalize_google_book(item))
+        else:
+            book_cards.append(_normalize_external_card(
+                item if isinstance(item, dict) else asdict(item)
+            ))
         if len(book_cards) >= 16:
             break
 
     context = {
         'category_name': display_name,
         'book_cards': book_cards,
+        'source_name': source_name,
     }
     return render(request, 'category_detail.html', context)
 
@@ -868,11 +876,28 @@ def recommendations(request):
 
         if user_mood:
             try:
+                history = request.session.get('recommendation_history', [])
+                excluded_titles = {
+                    str(item.get('title')).strip()
+                    for item in history
+                    if isinstance(item, dict) and item.get('title')
+                }
                 recommendations_list = get_recommendations_for_mood(
                     user_mood=user_mood,
                     limit=3,
                     improve_mood=improve_mood,
+                    exclude_titles=excluded_titles,
                 )
+                history.extend(
+                    {
+                        'title': item.get('title'),
+                        'mood': user_mood,
+                    }
+                    for item in recommendations_list
+                    if item.get('title')
+                )
+                request.session['recommendation_history'] = history[-30:]
+                request.session.modified = True
             except RecommendationUnavailableError as exc:
                 error_message = 'Unable to generate recommendations at this time. Please try again later.'
                 logger.error("Error in recommendations view: %s", exc, exc_info=True)
@@ -933,11 +958,21 @@ def search_books(request):
     external_error = ''
 
     if query:
+        external_provider = 'Google Books'
         try:
             external_books = search_google_books(query, max_results=8, language='en')
             external_cards = [_normalize_google_book(book) for book in external_books]
         except GoogleBooksError as exc:
-            external_error = str(exc)
+            external_books = search_open_library_books(query, limit=8)
+            external_cards = [_normalize_external_card(asdict(book)) for book in external_books]
+            external_provider = 'Open Library'
+            if not external_cards:
+                external_error = str(exc)
+        else:
+            if not external_cards:
+                external_books = search_open_library_books(query, limit=8)
+                external_cards = [_normalize_external_card(asdict(book)) for book in external_books]
+                external_provider = 'Open Library'
 
     if not (query or genre_slug):
         popular_books = list(
@@ -958,6 +993,7 @@ def search_books(request):
         'popular_cards': popular_cards,
         'active_genre_obj': active_genre_obj,
         'external_cards': external_cards,
+        'external_provider': external_provider if query else '',
         'external_error': external_error,
         'show_empty_state': show_empty_state,
     }
@@ -966,12 +1002,23 @@ def search_books(request):
 
 # -------------------- AUTH VIEWS --------------------
 
-def login_view(request):
-    google_enabled = bool(
-        getattr(settings, 'GOOGLE_OAUTH', {})
-        and settings.GOOGLE_OAUTH.get('CLIENT_ID')
-        and settings.GOOGLE_OAUTH.get('REDIRECT_URI')
+def _google_oauth_configured() -> bool:
+    config = getattr(settings, 'GOOGLE_OAUTH', {}) or {}
+    client_id = str(config.get('CLIENT_ID') or '').strip()
+    client_secret = str(config.get('CLIENT_SECRET') or '').strip()
+    redirect_uri = str(config.get('REDIRECT_URI') or '').strip()
+    placeholders = {'your-google-client-id', 'your-google-client-secret'}
+    return bool(
+        client_id
+        and client_secret
+        and redirect_uri
+        and client_id not in placeholders
+        and client_secret not in placeholders
     )
+
+
+def login_view(request):
+    google_enabled = _google_oauth_configured()
     if request.user.is_authenticated:
         return redirect('home')
 
@@ -996,7 +1043,7 @@ def login_view(request):
                 user = authenticate(request, username=identifier, password=password)
 
             if user is not None:
-                login(request, user)
+                login(request, user, backend='django.contrib.auth.backends.ModelBackend')
 
                 # Remember me
                 if form.cleaned_data.get('remember_me'):
@@ -1035,7 +1082,7 @@ def signup_view(request):
                     password=form.cleaned_data['password'],
                 )
                 messages.success(request, "Account created successfully. You're now logged in.")
-                login(request, user)
+                login(request, user, backend='django.contrib.auth.backends.ModelBackend')
                 return redirect('home')
             except Exception as e:
                 messages.error(request, f'Error creating account: {str(e)}')
@@ -1136,6 +1183,14 @@ def change_password(request):
 # -------------------- GOOGLE OAUTH --------------------
 
 def google_login(request):
+    if not _google_oauth_configured():
+        messages.error(
+            request,
+            'Google login is not configured. Set GOOGLE_CLIENT_ID, '
+            'GOOGLE_CLIENT_SECRET, and GOOGLE_REDIRECT_URI.',
+        )
+        return redirect('login')
+
     client_id = settings.GOOGLE_OAUTH.get('CLIENT_ID', '')
     redirect_uri = settings.GOOGLE_OAUTH.get('REDIRECT_URI', '')
     scope = settings.GOOGLE_OAUTH.get('SCOPE', 'openid email profile')

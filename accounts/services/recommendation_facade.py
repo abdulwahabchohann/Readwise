@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import random
+import secrets
 from pathlib import Path
 from typing import Any
 
@@ -189,10 +191,73 @@ def _recommendations_are_usable(items: list[dict[str, Any]]) -> bool:
     return bool(items) and all(item.get("title") and item.get("recommendation_reason") for item in items)
 
 
+def _open_library_subject_for_mood(mood_text: str) -> str:
+    text = mood_text.lower()
+    subject_keywords = (
+        (("anxious", "anxiety", "calm", "stress", "worried"), "psychology"),
+        (("sad", "lonely", "comfort", "grief"), "fiction"),
+        (("romantic", "romance", "love"), "romance"),
+        (("excited", "adventure", "fun"), "adventure"),
+        (("motivated", "productive", "success", "career"), "self-help"),
+        (("happy", "joy", "funny", "humor"), "humor"),
+    )
+    for keywords, subject in subject_keywords:
+        if any(keyword in text for keyword in keywords):
+            return subject
+    return "fiction"
+
+
+def _get_open_library_recommendations(
+    mood_text: str,
+    limit: int,
+    exclude_titles: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Return a keyless last-resort catalogue from Open Library."""
+    from .external import fetch_open_library_books
+
+    subject = _open_library_subject_for_mood(mood_text)
+    # Use different subject pages so repeated requests don't always return
+    # the same first few popular titles.
+    page = secrets.randbelow(5) + 1
+    books = fetch_open_library_books(subject, page)
+    if len(books) > limit:
+        books = random.SystemRandom().sample(books, limit)
+    excluded = {title.casefold() for title in (exclude_titles or set())}
+    recommendations: list[dict[str, Any]] = []
+    for book in books[:limit]:
+        title = str(book.title or "").strip()
+        if not title or title.casefold() in excluded:
+            continue
+        authors = ", ".join(author for author in book.authors if author)
+        categories = ", ".join(category for category in book.categories[:3] if category)
+        recommendations.append(
+            {
+                "book_id": book.id,
+                "title": title,
+                "author": authors or "Author unknown",
+                "genre": categories or subject.replace("-", " ").title(),
+                "cover_image": normalize_cover(book.thumbnail or PLACEHOLDER_COVER_URL),
+                "isbn_10": "",
+                "isbn_13": "",
+                "dominant_mood": "",
+                "recommendation_reason": (
+                    f"Open Library match for the {subject.replace('-', ' ')} theme "
+                    f"based on your mood."
+                ),
+                "sentiment_score": 0.5,
+                "match_percent": 50,
+                "source": "open_library",
+                "description": str(book.description or "").strip(),
+            }
+        )
+    return recommendations
+
+
 def get_recommendations_for_mood(
     user_mood: str,
     limit: int,
     improve_mood: bool,
+    exclude_titles: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     mood_text = (user_mood or "").strip()
     if not mood_text:
@@ -204,11 +269,24 @@ def get_recommendations_for_mood(
         raise RecommendationUnavailableError("Invalid recommendation limit.") from exc
 
     cache_timeout = _recommendation_cache_timeout()
-    cache_key = _build_cache_key(mood_text, limit_value, improve_mood)
+    excluded_titles = {title.casefold() for title in (exclude_titles or set())}
+    cache_key = _build_cache_key(
+        f"{mood_text}|exclude:{','.join(sorted(excluded_titles))}",
+        limit_value,
+        improve_mood,
+    )
     if cache_timeout:
         cached = cache.get(cache_key)
-        if isinstance(cached, list):
-            return cached[:limit_value]
+        if isinstance(cached, list) and not any(
+            isinstance(item, dict) and item.get("source") == "open_library"
+            for item in cached
+        ):
+            filtered_cached = [
+                item for item in cached
+                if str(item.get("title") or "").casefold() not in excluded_titles
+            ]
+            if filtered_cached:
+                return filtered_cached[:limit_value]
 
     mood_error: Exception | None = None
     dataset_error: Exception | None = None
@@ -223,6 +301,13 @@ def get_recommendations_for_mood(
                     min_confidence=0.3,
                 )
                 normalized_mood_items = _normalize_items(mood_items, _normalize_mood_item)
+                if excluded_titles:
+                    filtered_mood_items = [
+                        item for item in normalized_mood_items
+                        if str(item.get("title") or "").casefold() not in excluded_titles
+                    ]
+                    if filtered_mood_items:
+                        normalized_mood_items = filtered_mood_items
                 if _recommendations_are_usable(normalized_mood_items):
                     if cache_timeout:
                         cache.set(cache_key, normalized_mood_items[:limit_value], cache_timeout)
@@ -236,6 +321,13 @@ def get_recommendations_for_mood(
                 dataset_path = _resolve_dataset_path()
                 dataset_items = get_dataset_recommender(dataset_path).recommend(mood_text, top_n=limit_value)
                 normalized_dataset_items = _normalize_items(dataset_items, _normalize_dataset_item)
+                if excluded_titles:
+                    filtered_dataset_items = [
+                        item for item in normalized_dataset_items
+                        if str(item.get("title") or "").casefold() not in excluded_titles
+                    ]
+                    if filtered_dataset_items:
+                        normalized_dataset_items = filtered_dataset_items
                 if _recommendations_are_usable(normalized_dataset_items):
                     if cache_timeout:
                         cache.set(cache_key, normalized_dataset_items[:limit_value], cache_timeout)
@@ -244,6 +336,20 @@ def get_recommendations_for_mood(
             except Exception as exc:  # pragma: no cover - exercised via facade tests with monkeypatch
                 dataset_error = exc
                 logger.warning("Dataset recommender failed for mood=%s: %s", mood_text, exc)
+
+    try:
+        open_library_items = _get_open_library_recommendations(
+            mood_text,
+            limit_value,
+            excluded_titles,
+        )
+        if _recommendations_are_usable(open_library_items):
+            if cache_timeout:
+                cache.set(cache_key, open_library_items[:limit_value], cache_timeout)
+            return open_library_items[:limit_value]
+        logger.warning("Open Library returned no usable recommendations for mood=%s", mood_text)
+    except Exception as exc:
+        logger.warning("Open Library recommender failed for mood=%s: %s", mood_text, exc)
 
     if mood_error or dataset_error:
         raise RecommendationUnavailableError("Unable to generate recommendations at this time.") from (
